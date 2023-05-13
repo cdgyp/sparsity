@@ -1,11 +1,11 @@
 import argparse
-from torchvision.datasets import ImageFolder
+from torchvision.datasets import ImageFolder, CIFAR10
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server
 from ..modules.hooks import ActivationObservationPlugin
-from vit_pytorch.vit import ViT 
+from ..modules.vit import ViT 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--image_size', type=int, default=224)
@@ -21,6 +21,8 @@ args = all_args[0]
 
 writer = new_experiment(str(args), args)
 
+args.lr = args.lr / (512 / args.batch_size)
+
 train_transforms = transforms.Compose([
     transforms.Resize(args.image_size + 32),
     transforms.RandomCrop(args.image_size),
@@ -33,18 +35,14 @@ test_transforms = transforms.Compose([
     transforms.ToTensor()
 ])
 
-train_dataset = ImageFolder(
-    root='/data/datasets/tiny-imagenet-200/train', 
-    transform=train_transforms
-)
-test_dataset = ImageFolder(
-    root='/data/datasets/tiny-imagenet-200/test', 
-    transform=test_transforms
-)
+train_dataset = CIFAR10('/data/pz/sparsity/cifar10', True, transform=train_transforms, download=True)
+test_dataset = CIFAR10('/data/pz/sparsity/cifar10', False, transform=test_transforms, download=True)
+
 
 def make_dataloaders(dataset: ImageFolder):
-    indices = [i for i, c in enumerate(dataset.targets) if c < args.num_classes]
-    subset = WrapperDataset(Subset(dataset, indices))
+    # indices = [i for i, c in enumerate(dataset.targets) if c < args.num_classes]
+    # subset = WrapperDataset(Subset(dataset, indices))
+    subset = WrapperDataset(dataset)
 
     dataloader = DataLoader(subset, args.batch_size, True, num_workers=8, drop_last=True)
 
@@ -52,6 +50,8 @@ def make_dataloaders(dataset: ImageFolder):
 
 train_dataloader = make_dataloaders(train_dataset)
 test_dataloader = make_dataloaders(test_dataset)
+
+observation = ActivationObservationPlugin()
 
 vit = Model(
     Wrapper(
@@ -67,7 +67,7 @@ vit = Model(
         )
     ),
     ERM(),
-    ActivationObservationPlugin()
+    observation
 ).to(device)
 
 
@@ -86,3 +86,12 @@ training = Training(
 
 start_tensorboard_server(writer.log_dir)
 training.run()
+writer.add_hparams(
+    vars(args),
+    {
+        **{f'hparam/diagonal_gradients/mean': float(observation.diagonal_gradients.mean())},
+        **{f'hparam/diagonal_gradients/{i}': float(dg) for i, dg in enumerate(observation.diagonal_gradients)},
+        **{f'hparam/gradient_ratios/mean': float(observation.gradient_ratios.mean())},
+        **{f'hparam/gradient_ratios/{i}': r for i, r in enumerate(observation.gradient_ratios)}
+    }
+)
