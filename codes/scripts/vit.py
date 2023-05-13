@@ -16,6 +16,7 @@ parser.add_argument('--optimizer', type=str, default='SGD', choices=['SGD', 'Ada
 parser.add_argument('--num_classes', type=int, default=10)
 parser.add_argument('--weight_decay', type=float, default=1e-4)
 parser.add_argument('--n_epoch', type=int, default=10)
+parser.add_argument('--grad_clipping', type=float, default=None)
 all_args = parser.parse_known_args()
 args = all_args[0]
 
@@ -81,7 +82,8 @@ training = Training(
     test_every_epoch=1,
     save_every_epoch=None,
     optimizer=args.optimizer,
-    weight_decay=args.weight_decay
+    weight_decay=args.weight_decay,
+    gradient_clipping=args.grad_clipping
 )
 
 start_tensorboard_server(writer.log_dir)
