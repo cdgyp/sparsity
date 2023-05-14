@@ -14,14 +14,15 @@ class ActivationHook(Hook):
 
         res = []
         for name, module in vit.named_modules():
-            if not '1.fn' in name:
+            if not isinstance(module, FeedForward):
                 continue
-            for type in module_types:
-                if isinstance(module, type):
-                    h = hook_type()
-                    h.hook_on(module, name)
-                    res.append(h)
-                    break
+            for submodule in module.modules():
+                for type in module_types:
+                    if isinstance(submodule, type):
+                        h = hook_type()
+                        h.hook_on(submodule)
+                        res.append(h)
+                        break
         
         return res
 
@@ -37,30 +38,32 @@ class ActivationMapHook(ForwardHook):
     def hook_on_all(module: nn.Module, *args, **kwargs):
         return ActivationHook.hook_on_all(module, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU]))
 
-class ActivationGradientHook(BackwardHook):
+class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
         super().__init__()
         self.gradients: torch.Tensor = None
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
-        grad_input = grad_input[0]
-        assert isinstance(grad_input, torch.Tensor), grad_input
-        self.gradients = grad_input
+        assert isinstance(grad_output, tuple) and len(grad_output) == 1
+        grad = grad_output[0]
+        assert isinstance(grad, torch.Tensor), grad
+        self.gradients = grad
     def hook_on_all(module: nn.Module, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, *args, **replace_config(kwargs, type=ActivationGradientHook, module_types=[FeedForward]))
+        return ActivationHook.hook_on_all(module, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward]))
     
 
 class ActivationObservationPlugin(Plugin):
-    def __init__(self, beta=0.9):
+    def __init__(self, p=1, beta=0.9):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
-        self.gradient_hooks: list[ActivationGradientHook] = []
+        self.gradient_hooks: list[MlpGradientHook] = []
         self.gradient_ratios = 1
         self.diagonal_gradients = 0
         self.beta = beta
+        self.p = p
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main)
-        self.gradient_hooks = ActivationGradientHook.hook_on_all(main)
+        self.gradient_hooks = MlpGradientHook.hook_on_all(main)
         print(len(self.activation_hooks), len(self.gradient_hooks))
     def forward(self, res: torch.Tensor, *args, **kwargs):
 
@@ -74,10 +77,11 @@ class ActivationObservationPlugin(Plugin):
             for i, h in enumerate(self.activation_hooks):
                 assert h.handle is not None
                 a = h.activations
-                assert len(a.shape) == 3
+                assert len(a.shape) > 1
                 great_than_zero = (a > 0).float()
                 self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', str(i))
-                self.losses.observe((a.abs() * great_than_zero).sum(dim=[-1, -2]) / great_than_zero.sum(dim=[-1, -2]), 'activation', 'amplitude', str(i))
+                dims = list(range(len(a.shape)))[1:]
+                self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation', 'amplitude', str(i))
 
         return res
     def after_backward(self):
@@ -104,8 +108,8 @@ class ActivationObservationPlugin(Plugin):
 
                 # diagonal: torch.Tensor = (ggT * identity).abs().sum(dim=[-1, -2])
                 # non_diagonal: torch.Tensor = (ggT * (1 - identity)).abs().sum(dim=[-1, -2])
-                diagonal: torch.Tensor = (ggT * identity).norm(p=1, dim=[-1, -2])
-                non_diagonal: torch.Tensor = (ggT * (1 - identity)).norm(p=1, dim=[-1, -2])
+                diagonal: torch.Tensor = (ggT * identity).norm(p=self.p, dim=[-1, -2])
+                non_diagonal: torch.Tensor = (ggT * (1 - identity)).norm(p=self.p, dim=[-1, -2])
                 assert len(diagonal.shape) == 1 and len(non_diagonal.shape) == 1
                 self.losses.observe(diagonal, 'gradient', 'diagonal', str(i))
                 self.losses.observe(non_diagonal, 'gradient', 'non-diagonal', str(i))
