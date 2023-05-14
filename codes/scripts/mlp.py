@@ -1,15 +1,14 @@
 import argparse
-from torchvision.datasets import ImageFolder, CIFAR10
+from torchvision.datasets import ImageFolder, CIFAR10, MNIST
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
+from torch import nn
 
-from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
+from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server
 from ..modules.hooks import ActivationObservationPlugin
-from ..modules.vit import ViT 
-
+from ..modules.vit import FeedForward
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--title', type=str, default='vit')
 parser.add_argument('--image_size', type=int, default=224)
 parser.add_argument('--batch_size', type=int, default=64)
 parser.add_argument('--dropout', type=float, default=0.1)
@@ -19,15 +18,13 @@ parser.add_argument('--num_classes', type=int, default=10)
 parser.add_argument('--weight_decay', type=float, default=1e-4)
 parser.add_argument('--n_epoch', type=int, default=10)
 parser.add_argument('--grad_clipping', type=float, default=None)
-parser.add_argument('--p', type=float, default=1)
-parser.add_argument('--batchwise_reported', type=int, default=0)
+parser.add_argument('--hidden_dim', type=int, default=3072)
 all_args = parser.parse_known_args()
 args = all_args[0]
 
-print('not known params', all_args[1])
-writer, ref_hash = new_experiment(args.title + '_' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
+writer = new_experiment('mlp_' + str(args), args)
 
-# args.lr = args.lr / (512 / args.batch_size)
+args.lr = args.lr / (512 / args.batch_size)
 
 train_transforms = transforms.Compose([
     transforms.Resize(args.image_size + 32),
@@ -41,8 +38,8 @@ test_transforms = transforms.Compose([
     transforms.ToTensor()
 ])
 
-train_dataset = CIFAR10('/data/pz/sparsity/cifar10', True, transform=train_transforms, download=True)
-test_dataset = CIFAR10('/data/pz/sparsity/cifar10', False, transform=test_transforms, download=True)
+train_dataset = MNIST('/data/pz/sparsity/mnist', True, transform=train_transforms, download=True)
+test_dataset = MNIST('/data/pz/sparsity/mnist', False, transform=test_transforms, download=True)
 
 
 def make_dataloaders(dataset: ImageFolder):
@@ -57,19 +54,23 @@ def make_dataloaders(dataset: ImageFolder):
 train_dataloader = make_dataloaders(train_dataset)
 test_dataloader = make_dataloaders(test_dataset)
 
-observation = ActivationObservationPlugin(p=args.p, batchwise_reported=bool(args.batchwise_reported))
+observation = ActivationObservationPlugin()
+
+class MLP(nn.Module):
+    def __init__(self, width_in, width_out, width_hidden=3072):
+        super().__init__()
+        self.network = FeedForward(dim=width_in, hidden_dim=width_hidden, dim_out=width_out)
+
+    def forward(self, X):
+        X = X.flatten(1)
+        return self.network(X)
 
 vit = Model(
     Wrapper(
-        ViT(
-            image_size=args.image_size,
-            patch_size=16,
-            num_classes=args.num_classes,
-            dim=768,
-            depth=12,
-            heads=12,
-            mlp_dim=3072,
-            dropout=args.dropout
+        MLP(
+            width_in=args.image_size ** 2, 
+            width_out=args.num_classes, 
+            width_hidden=args.hidden_dim
         )
     ),
     ERM(),
@@ -94,6 +95,11 @@ training = Training(
 start_tensorboard_server(writer.log_dir)
 training.run()
 writer.add_hparams(
-    {**vars(args), 'reference_has': ref_hash},
-    observation.get_results()
+    vars(args),
+    {
+        **{f'hparam/diagonal_gradients/mean': float(observation.diagonal_gradients.mean())},
+        **{f'hparam/diagonal_gradients/{i}': float(dg) for i, dg in enumerate(observation.diagonal_gradients)},
+        **{f'hparam/gradient_ratios/mean': float(observation.gradient_ratios.mean())},
+        **{f'hparam/gradient_ratios/{i}': r for i, r in enumerate(observation.gradient_ratios)}
+    }
 )
