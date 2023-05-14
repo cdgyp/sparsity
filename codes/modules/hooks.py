@@ -51,16 +51,70 @@ class MlpGradientHook(BackwardHook):
     def hook_on_all(module: nn.Module, *args, **kwargs):
         return ActivationHook.hook_on_all(module, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward]))
     
+class GradientRecorder(BaseModule):
+    def __init__(self, p=1, beta=0.9, label=''):
+        super().__init__()
+        self.label = label
+        self.gradient_ratios = 1
+        self.diagonal_gradients = 0
+        self.layerwise_gradient_ratios = []
+        self.layerwise_diagonal_gradients = []
+        self.p = p
+        self.beta = beta
+
+
+    def forward(self, g: torch.Tensor, i: int):
+        ggT = einsum(
+            g,          g,
+            '... k1 d,    ... k2 d  ->  ... k1 k2'
+        )
+                
+        identity = torch.eye(ggT.shape[-1], device=ggT.device)
+        if len(ggT.shape) > len(identity.shape):
+            identity = identity.unsqueeze(dim=0)
+
+        diagonal: torch.Tensor = (ggT * identity).norm(p=self.p, dim=[-1, -2])
+        non_diagonal: torch.Tensor = (ggT * (1 - identity)).norm(p=self.p, dim=[-1, -2])
+        assert len(diagonal.shape) in {0, 1} and len(non_diagonal.shape) in {0, 1}
+        self.losses.observe(diagonal, self.label + '_gradient', 'diagonal', str(i))
+        self.losses.observe(non_diagonal, self.label + '_gradient', 'non-diagonal', str(i))
+        self.losses.observe((diagonal / (non_diagonal + 1e-32)).log10(), self.label + '_gradient_ratio', str(i))
+
+        self.layerwise_gradient_ratios.append((diagonal / (non_diagonal + 1e-32)).log10().mean())
+        self.layerwise_diagonal_gradients.append(diagonal.mean())
+    
+    def summarize(self):
+        gradient_ratios = torch.stack(self.layerwise_gradient_ratios).flatten()
+        diagonal_gradients = torch.stack(self.layerwise_diagonal_gradients).flatten()
+        self.gradient_ratios = self.beta * self.gradient_ratios + (1 - self.beta) * gradient_ratios
+        self.diagonal_gradients = self.beta * self.diagonal_gradients + (1 - self.beta) * diagonal_gradients
+
+        assert self.gradient_ratios.requires_grad == False
+        assert self.diagonal_gradients.requires_grad == False
+
+        self.layerwise_diagonal_gradients = []
+        self.layerwise_gradient_ratios = []
+    
+    def get_results(self):
+        return {
+            **{f'hparam/{self.label}_diagonal_gradients/mean': float(self.diagonal_gradients.mean())},
+            **{f'hparam/{self.label}_diagonal_gradients/{i}': float(dg) for i, dg in enumerate(self.diagonal_gradients)},
+            **{f'hparam/{self.label}_gradient_ratios/mean': float(self.gradient_ratios.mean())},
+            **{f'hparam/{self.label}_gradient_ratios/{i}': r for i, r in enumerate(self.gradient_ratios)}
+        }
 
 class ActivationObservationPlugin(Plugin):
-    def __init__(self, p=1, beta=0.9):
+    def __init__(self, p=1, beta=0.9, batchwise_reported=False):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
         self.gradient_hooks: list[MlpGradientHook] = []
-        self.gradient_ratios = 1
-        self.diagonal_gradients = 0
         self.beta = beta
         self.p = p
+        self.sizes = []
+        self.samplewise_recorder = GradientRecorder(p=self.p, beta=self.beta, label='sample')
+        self.batchwise_reported = batchwise_reported
+        self.batchwise_recorder = GradientRecorder(p=self.p, beta=self.beta, label='batch')
+
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main)
         self.gradient_hooks = MlpGradientHook.hook_on_all(main)
@@ -69,7 +123,7 @@ class ActivationObservationPlugin(Plugin):
 
         if not self.training:
             return res
-        if self.iteration < 20:
+        if self.iteration < 0:
             return res
         
         with torch.no_grad():
@@ -83,6 +137,11 @@ class ActivationObservationPlugin(Plugin):
                 dims = list(range(len(a.shape)))[1:]
                 self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation', 'amplitude', str(i))
 
+                if i >= len(self.sizes):
+                    self.sizes.append(a.shape[1])
+                self.sizes[i] = a.shape[1]
+                assert len(self.sizes) > i
+
         return res
     def after_backward(self):
 
@@ -93,35 +152,27 @@ class ActivationObservationPlugin(Plugin):
 
         with torch.no_grad():
             assert self.training
-            gradient_ratios = []
-            diagonal_gradients = []
             for i,  h in enumerate(self.gradient_hooks):
                 assert h.handle is not None
                 g = h.gradients
+                assert g.shape[1] == self.sizes[i]
 
-                ggT = einsum(
-                    g,          g,
-                    'b k1 d,    b k2 d  ->  b k1 k2'
-                )
+                self.samplewise_recorder(g, i)
+                if self.batchwise_reported:
+                    self.batchwise_recorder(g.flatten(0, 1), i)
+            
+            self.samplewise_recorder.summarize()
+            if self.batchwise_reported:
+                self.batchwise_recorder.summarize()
+    def get_results(self):
+        if self.batchwise_reported:
+            return {
+                **self.samplewise_recorder.get_results(),
+                **self.batchwise_recorder.get_results()
+            }
+        else:
+            return self.samplewise_recorder.get_results()
 
-                identity = torch.eye(ggT.shape[-1], device=ggT.device).unsqueeze(dim=0)
-
-                # diagonal: torch.Tensor = (ggT * identity).abs().sum(dim=[-1, -2])
-                # non_diagonal: torch.Tensor = (ggT * (1 - identity)).abs().sum(dim=[-1, -2])
-                diagonal: torch.Tensor = (ggT * identity).norm(p=self.p, dim=[-1, -2])
-                non_diagonal: torch.Tensor = (ggT * (1 - identity)).norm(p=self.p, dim=[-1, -2])
-                assert len(diagonal.shape) == 1 and len(non_diagonal.shape) == 1
-                self.losses.observe(diagonal, 'gradient', 'diagonal', str(i))
-                self.losses.observe(non_diagonal, 'gradient', 'non-diagonal', str(i))
-                self.losses.observe((diagonal / (non_diagonal + 1e-32)).log10(), 'gradient_ratio', str(i))
-
-                gradient_ratios.append((diagonal / (non_diagonal + 1e-32)).log10().mean())
-                diagonal_gradients.append(diagonal.mean())
-
-            gradient_ratios = torch.stack(gradient_ratios).flatten()
-            diagonal_gradients = torch.stack(diagonal_gradients).flatten()
-            self.gradient_ratios = self.beta * self.gradient_ratios + (1 - self.beta) * gradient_ratios
-            self.diagonal_gradients = self.beta * self.diagonal_gradients + (1 - self.beta) * diagonal_gradients
 
 
     def clean(self):
