@@ -57,7 +57,7 @@ def make_dataloaders(dataset: ImageFolder):
 train_dataloader = make_dataloaders(train_dataset)
 test_dataloader = make_dataloaders(test_dataset)
 
-observation = ActivationObservationPlugin(p=args.p, batchwise_reported=bool(args.batchwise_reported))
+observation = ActivationObservationPlugin(p=args.p, depth=12, batchwise_reported=bool(args.batchwise_reported))
 
 vit = Model(
     Wrapper(
