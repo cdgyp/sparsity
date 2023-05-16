@@ -62,6 +62,10 @@ class GradientRecorder(BaseModule):
         self.p = p
         self.beta = beta
 
+        self.layerwise_pn_gradient_ratios = []
+        self.pn_gradient_ratios = 0
+
+
 
     def forward(self, g: torch.Tensor, i: int):
         ggT = einsum(
@@ -82,25 +86,38 @@ class GradientRecorder(BaseModule):
 
         self.layerwise_gradient_ratios.append((diagonal / (non_diagonal + 1e-32)).log10().mean())
         self.layerwise_diagonal_gradients.append(diagonal.mean())
+
+        positive = (ggT * (ggT > 0)).norm(p=self.p, dim=[-1, -2])
+        negative = (ggT * (ggT < 0)).norm(p=self.p, dim=[-1, -2])
+        pn_ratio = (positive / (negative + 1e-32))
+        self.layerwise_pn_gradient_ratios.append(pn_ratio.log10().mean())
+        self.losses.observe(pn_ratio.log10(), self.label + 'positive-negative_gradient_ratio', str(i))
+
+
     
     def summarize(self):
         gradient_ratios = torch.stack(self.layerwise_gradient_ratios).flatten()
         diagonal_gradients = torch.stack(self.layerwise_diagonal_gradients).flatten()
+        pn_gradient_ratios = torch.stack(self.layerwise_pn_gradient_ratios).flatten()
         self.gradient_ratios = self.beta * self.gradient_ratios + (1 - self.beta) * gradient_ratios
         self.diagonal_gradients = self.beta * self.diagonal_gradients + (1 - self.beta) * diagonal_gradients
+        self.pn_gradient_ratios = self.beta * self.pn_gradient_ratios + (1 - self.beta) * pn_gradient_ratios
 
         assert self.gradient_ratios.requires_grad == False
         assert self.diagonal_gradients.requires_grad == False
 
         self.layerwise_diagonal_gradients = []
         self.layerwise_gradient_ratios = []
+        self.layerwise_pn_gradient_ratios = []
     
     def get_results(self):
         return {
             **{f'hparam/{self.label}_diagonal_gradients/mean': float(self.diagonal_gradients.mean())},
             **{f'hparam/{self.label}_diagonal_gradients/{i}': float(dg) for i, dg in enumerate(self.diagonal_gradients)},
             **{f'hparam/{self.label}_gradient_ratios/mean': float(self.gradient_ratios.mean())},
-            **{f'hparam/{self.label}_gradient_ratios/{i}': r for i, r in enumerate(self.gradient_ratios)}
+            **{f'hparam/{self.label}_gradient_ratios/{i}': r for i, r in enumerate(self.gradient_ratios)},
+            **{f'hparam/{self.label}_positive-negative_gradient_ratios/mean': float(self.pn_gradient_ratios.mean())},
+            **{f'hparam/{self.label}_positive-negative_gradient_ratios/{i}': r for i, r in enumerate(self.pn_gradient_ratios)},
         }
 
 class ActivationObservationPlugin(Plugin):
