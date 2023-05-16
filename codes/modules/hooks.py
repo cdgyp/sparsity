@@ -8,7 +8,7 @@ from .vit import ViT, FeedForward
 
 
 class ActivationHook(Hook):
-    def hook_on_all(vit: ViT, *args, **kwargs):
+    def hook_on_all(vit: ViT, depth, *args, **kwargs):
         hook_type = kwargs['type']  if 'type'  in kwargs and kwargs['type'] is not None else ActivationHook
         module_types = kwargs['module_types']
 
@@ -16,12 +16,15 @@ class ActivationHook(Hook):
         for name, module in vit.named_modules():
             if not isinstance(module, FeedForward):
                 continue
+            if str(depth - 1) in name:
+                continue
             for submodule in module.modules():
                 for type in module_types:
                     if isinstance(submodule, type):
                         h = hook_type()
                         h.hook_on(submodule)
                         res.append(h)
+                        print(f'hook {hook_type} at module {submodule} as {type}')
                         break
         
         return res
@@ -35,8 +38,8 @@ class ActivationMapHook(ForwardHook):
         assert isinstance(output, torch.Tensor), output
         self.activations = output
 
-    def hook_on_all(module: nn.Module, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU]))
+    def hook_on_all(module: nn.Module, depth, *args, **kwargs):
+        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU]))
 
 class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
@@ -48,8 +51,8 @@ class MlpGradientHook(BackwardHook):
         grad = grad_output[0]
         assert isinstance(grad, torch.Tensor), grad
         self.gradients = grad
-    def hook_on_all(module: nn.Module, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward]))
+    def hook_on_all(module: nn.Module, depth, *args, **kwargs):
+        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward]))
     
 class GradientRecorder(BaseModule):
     def __init__(self, p=1, beta=0.9, label=''):
@@ -72,7 +75,7 @@ class GradientRecorder(BaseModule):
             g,          g,
             '... k1 d,    ... k2 d  ->  ... k1 k2'
         )
-                
+
         identity = torch.eye(ggT.shape[-1], device=ggT.device)
         if len(ggT.shape) > len(identity.shape):
             identity = identity.unsqueeze(dim=0)
@@ -91,7 +94,7 @@ class GradientRecorder(BaseModule):
         negative = (ggT * (ggT < 0)).norm(p=self.p, dim=[-1, -2])
         pn_ratio = (positive / (negative + 1e-32))
         self.layerwise_pn_gradient_ratios.append(pn_ratio.log10().mean())
-        self.losses.observe(pn_ratio.log10(), self.label + 'positive-negative_gradient_ratio', str(i))
+        self.losses.observe(pn_ratio.log10(), self.label + '_positive-negative_gradient_ratio', str(i))
 
 
     
@@ -119,9 +122,64 @@ class GradientRecorder(BaseModule):
             **{f'hparam/{self.label}_positive-negative_gradient_ratios/mean': float(self.pn_gradient_ratios.mean())},
             **{f'hparam/{self.label}_positive-negative_gradient_ratios/{i}': r for i, r in enumerate(self.pn_gradient_ratios)},
         }
+    
+class CorrelationRecorder(BaseModule):
+    def __init__(self, label='', beta=0.8):
+        super().__init__()
+        self.beta = beta
+        self.layerwise_correlations = []
+        self.layerwise_means = []
+        self.correlations = 0
+        self.means = 0
+        self.label = label
+
+    def forward(self, g: torch.Tensor, i: int):
+        assert len(g.shape) == 3
+
+        mean = g.mean(dim=0)
+        self.layerwise_means.append(mean.abs().mean())
+
+        sigma = ((g - mean.unsqueeze(dim=0))**2).mean(dim=0).sqrt()
+        e_xy = einsum(
+            g,      g,
+            'b i d, b j d   ->  i j d'
+        ) / g.shape[0]
+        ex_ey = einsum(
+            mean,   mean,
+            'i d,   j d     ->  i j d'
+        )
+        cov = e_xy - ex_ey
+
+        assert len(sigma.shape) == 2
+        correlation = (cov / sigma.unsqueeze(dim=0) / sigma.unsqueeze(dim=1)).abs()
+
+        self.layerwise_correlations.append(correlation.mean())
+
+        self.losses.observe(mean, self.label + '_gradient_means', str(i))
+        self.losses.observe(correlation, self.label + '_gradient_pearson_correlations', str(i))
+
+    def summarize(self):
+        assert len(self.layerwise_correlations[0].shape) in {0, 1}, self.layerwise_correlations[0].shape
+        assert len(self.layerwise_means[0].shape) in {0, 1}, self.layerwise_means[0].shape
+        means = torch.stack(self.layerwise_means).flatten()
+        correlations = torch.stack(self.layerwise_correlations).flatten()
+
+        self.means = self.beta * self.means + (1 - self.beta) * means
+        self.correlations = self.beta * self.correlations  + (1 - self.beta) * correlations
+
+        self.layerwise_correlations = []
+        self.layerwise_means = []
+
+
+    def get_results(self):
+        return {
+            **{f'hparam/{self.label}_person_corelation/mean': float(self.correlations.mean())},
+            **{f'hparam/{self.label}_person_corelation/{i}': c for i, c in enumerate(self.correlations)}
+        }
+
 
 class ActivationObservationPlugin(Plugin):
-    def __init__(self, p=1, beta=0.9, batchwise_reported=False):
+    def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
         self.gradient_hooks: list[MlpGradientHook] = []
@@ -132,9 +190,13 @@ class ActivationObservationPlugin(Plugin):
         self.batchwise_reported = batchwise_reported
         self.batchwise_recorder = GradientRecorder(p=self.p, beta=self.beta, label='batch')
 
+        self.samplewise_correlation_recorder = CorrelationRecorder(label='sample', beta=self.beta)
+
+        self.depth = depth
+
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
-        self.activation_hooks = ActivationMapHook.hook_on_all(main)
-        self.gradient_hooks = MlpGradientHook.hook_on_all(main)
+        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
+        self.gradient_hooks = MlpGradientHook.hook_on_all(main, self.depth)
         print(len(self.activation_hooks), len(self.gradient_hooks))
     def forward(self, res: torch.Tensor, *args, **kwargs):
 
@@ -164,7 +226,7 @@ class ActivationObservationPlugin(Plugin):
 
         if not self.training:
             return
-        if self.iteration < 20:
+        if self.iteration < 0:
             return
 
         with torch.no_grad():
@@ -177,18 +239,24 @@ class ActivationObservationPlugin(Plugin):
                 self.samplewise_recorder(g, i)
                 if self.batchwise_reported:
                     self.batchwise_recorder(g.flatten(0, 1), i)
+                self.samplewise_correlation_recorder(g, i)
             
             self.samplewise_recorder.summarize()
             if self.batchwise_reported:
                 self.batchwise_recorder.summarize()
+            self.samplewise_correlation_recorder.summarize()
     def get_results(self):
         if self.batchwise_reported:
             return {
                 **self.samplewise_recorder.get_results(),
-                **self.batchwise_recorder.get_results()
+                **self.batchwise_recorder.get_results(),
+                **self.samplewise_correlation_recorder.get_results()
             }
         else:
-            return self.samplewise_recorder.get_results()
+            return {
+                **self.samplewise_recorder.get_results(),
+                **self.samplewise_correlation_recorder.get_results(),
+            }
 
 
 
