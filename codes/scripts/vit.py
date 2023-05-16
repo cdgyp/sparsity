@@ -1,6 +1,8 @@
 import argparse
+from typing import Any
 from torchvision.datasets import ImageFolder, CIFAR10
 from torch.utils.data import DataLoader, Subset
+from torch.optim.lr_scheduler import LambdaLR
 from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
@@ -21,6 +23,8 @@ parser.add_argument('--n_epoch', type=int, default=10)
 parser.add_argument('--grad_clipping', type=float, default=None)
 parser.add_argument('--p', type=float, default=1)
 parser.add_argument('--batchwise_reported', type=int, default=0)
+parser.add_argument('--warmup_epoch', type=int, default=5)
+parser.add_argument('--initial_lr_ratio', type=float, default=1e-1)
 all_args = parser.parse_known_args()
 args = all_args[0]
 
@@ -76,6 +80,10 @@ vit = Model(
     observation
 ).to(device)
 
+def print_and_return(x):
+    print(x)
+    return x
+
 
 training = Training(
     n_epoch=args.n_epoch,
@@ -88,7 +96,11 @@ training = Training(
     save_every_epoch=None,
     optimizer=args.optimizer,
     weight_decay=args.weight_decay,
-    gradient_clipping=args.grad_clipping
+    gradient_clipping=args.grad_clipping,
+    scheduler_args={
+        'lr_lambda': lambda epoch: args.initial_lr_ratio + min(epoch / len(train_dataloader) / args.warmup_epoch, 1) * (1 - args.initial_lr_ratio),
+        'last_epoch': args.warmup_epoch,
+    }
 )
 
 start_tensorboard_server(writer.log_dir)
