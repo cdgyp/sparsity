@@ -1,6 +1,6 @@
 title='vit6/vit'
 num_classes=10
-n_epoch=100
+n_epoch=30
 weight_decay=0.00
 dropout=0.0
 batch_size=96
