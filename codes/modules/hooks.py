@@ -1,10 +1,11 @@
 import torch
 from torch import nn
-from codes.base.base import BaseModule, Plugin
+from codes.base.base import BaseModule, Plugin, ModuleReference
 from einops import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
 from .vit import ViT, FeedForward
+from .relu_vit import MLPBlock
 
 
 class ActivationHook(Hook):
@@ -14,7 +15,7 @@ class ActivationHook(Hook):
 
         res = []
         for name, module in vit.named_modules():
-            if not isinstance(module, FeedForward):
+            if not isinstance(module, FeedForward) and not isinstance(module, MLPBlock):
                 continue
             if str(depth - 1) in name:
                 continue
@@ -52,7 +53,7 @@ class MlpGradientHook(BackwardHook):
         assert isinstance(grad, torch.Tensor), grad
         self.gradients = grad
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward]))
+        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward, MLPBlock]))
     
 class GradientRecorder(BaseModule):
     def __init__(self, p=1, beta=0.9, label=''):
@@ -177,6 +178,15 @@ class CorrelationRecorder(BaseModule):
             **{f'hparam/{self.label}_person_corelation/{i}': c for i, c in enumerate(self.correlations)}
         }
 
+class IdleRecorder(BaseModule):
+    def __init__(self):
+        super().__init__()
+    def forward(*args, **kwargs):
+        pass
+    def summarize(self):
+        pass
+    def get_results(self):
+        return dict()
 
 class ActivationObservationPlugin(Plugin):
     def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False):
@@ -190,14 +200,19 @@ class ActivationObservationPlugin(Plugin):
         self.batchwise_reported = batchwise_reported
         self.batchwise_recorder = GradientRecorder(p=self.p, beta=self.beta, label='batch')
 
-        self.samplewise_correlation_recorder = CorrelationRecorder(label='sample', beta=self.beta)
+        #self.samplewise_correlation_recorder = CorrelationRecorder(label='sample', beta=self.beta)
+        self.samplewise_correlation_recorder = IdleRecorder()
 
         self.depth = depth
+
+        self.main = None
 
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
         self.gradient_hooks = MlpGradientHook.hook_on_all(main, self.depth)
         print(len(self.activation_hooks), len(self.gradient_hooks))
+        self.main: BaseModule = ModuleReference(main)
+    
     def forward(self, res: torch.Tensor, *args, **kwargs):
 
         if not self.training:
@@ -215,6 +230,7 @@ class ActivationObservationPlugin(Plugin):
                 self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', str(i))
                 dims = list(range(len(a.shape)))[1:]
                 self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation', 'amplitude', str(i))
+                self.losses.observe(a.norm(p='fro', dim=[-1, -2]).mean(), 'activation_norms', i)
 
                 if i >= len(self.sizes):
                     self.sizes.append(a.shape[1])
@@ -245,6 +261,22 @@ class ActivationObservationPlugin(Plugin):
             if self.batchwise_reported:
                 self.batchwise_recorder.summarize()
             self.samplewise_correlation_recorder.summarize()
+
+            grad_norm = 0
+            for m in self.main.modules():
+                if isinstance(m, FeedForward) or isinstance(m, MLPBlock):
+                    layers = None 
+                    if isinstance(m, FeedForward):
+                        layers = m.net
+                    elif isinstance(m, MLPBlock):   
+                        layers = m
+                    key_linear = layers[3]
+                    assert isinstance(key_linear, nn.Linear)
+
+
+                    if key_linear.weight.grad is not None:
+                        grad_norm += (key_linear.weight.grad**2).sum()
+            self.losses.observe(grad_norm.sqrt(), 'grad norm wrt keys')
     def get_results(self):
         if self.batchwise_reported:
             return {
