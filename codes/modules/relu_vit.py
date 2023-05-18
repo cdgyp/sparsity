@@ -37,14 +37,22 @@ class ConvStemConfig(NamedTuple):
     norm_layer: Callable[..., nn.Module] = nn.BatchNorm2d
     activation_layer: Callable[..., nn.Module] = nn.ReLU
 
+class SymmetricReLU(nn.Module):
+    def __init__(self, half_interval=1) -> None:
+        super().__init__()
+        self.half_interval = half_interval
+        self.relu = nn.ReLU()
+    def forward(self, x: torch.Tensor):
+        return self.relu(x.abs() - self.half_interval)
 
 class MLPBlock(MLP):
     """Transformer MLP block."""
 
     _version = 2
+    default_activation_layer=SymmetricReLU
 
     def __init__(self, in_dim: int, mlp_dim: int, dropout: float):
-        super().__init__(in_dim, [mlp_dim, in_dim], activation_layer=nn.ReLU, inplace=None, dropout=dropout)
+        super().__init__(in_dim, [mlp_dim, in_dim], activation_layer=MLPBlock.default_activation_layer, inplace=None, dropout=dropout)
 
         for m in self.modules():
             if isinstance(m, nn.Linear):

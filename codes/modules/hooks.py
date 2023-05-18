@@ -35,9 +35,12 @@ class ActivationMapHook(ForwardHook):
     def __init__(self) -> None:
         super().__init__()
         self.activations: torch.Tensor = None
+        self.pre_activations: torch.Tensor = None
     def __call__(self, module: nn.Module, input, output):
         assert isinstance(output, torch.Tensor), output
         self.activations = output
+        assert isinstance(input, tuple) and len(input) == 1
+        self.pre_activations = input[0]
 
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
         return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU]))
@@ -71,7 +74,7 @@ class GradientRecorder(BaseModule):
 
 
 
-    def forward(self, g: torch.Tensor, i: int):
+    def forward(self, g: torch.Tensor, i: int, a: torch.Tensor):
         ggT = einsum(
             g,          g,
             '... k1 d,    ... k2 d  ->  ... k1 k2'
@@ -96,6 +99,17 @@ class GradientRecorder(BaseModule):
         pn_ratio = (positive / (negative + 1e-32))
         self.layerwise_pn_gradient_ratios.append(pn_ratio.log10().mean())
         self.losses.observe(pn_ratio.log10(), self.label + '_positive-negative_gradient_ratio', str(i))
+
+        aaT = einsum(
+            a,          a,
+            '... k1 d, ... k2 d -> ... k1 k2'
+        )
+        inner_products = aaT * ggT
+        diagonal_inner_products = (inner_products * identity).sum(dim=[-1, -2])
+        non_diagonal_inner_products = (inner_products * (1 - identity)).sum(dim=[-1, -2])
+        self.losses.observe(diagonal_inner_products, self.label + '_matrix_inner_product', 'diagonal', i)
+        self.losses.observe(non_diagonal_inner_products, self.label + '_matrix_inner_product', 'non-diagonal', i)
+        self.losses.observe((diagonal_inner_products / (non_diagonal_inner_products.abs() + 1e-32)).log10(), self.label + '_matrix_inner_product_ratio', i)
 
 
     
@@ -232,6 +246,8 @@ class ActivationObservationPlugin(Plugin):
                 self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation', 'amplitude', str(i))
                 self.losses.observe(a.norm(p='fro', dim=[-1, -2]).mean(), 'activation_norms', i)
 
+                self.losses.observe(h.pre_activations, 'pre_activation', i)
+
                 if i >= len(self.sizes):
                     self.sizes.append(a.shape[1])
                 self.sizes[i] = a.shape[1]
@@ -252,7 +268,8 @@ class ActivationObservationPlugin(Plugin):
                 g = h.gradients
                 assert g.shape[1] == self.sizes[i]
 
-                self.samplewise_recorder(g, i)
+                assert self.activation_hooks[i].activations is not None
+                self.samplewise_recorder(g, i, self.activation_hooks[i].activations)
                 if self.batchwise_reported:
                     self.batchwise_recorder(g.flatten(0, 1), i)
                 self.samplewise_correlation_recorder(g, i)
@@ -293,7 +310,9 @@ class ActivationObservationPlugin(Plugin):
 
 
     def clean(self):
-        for h in self.activation_hooks:
-            h.activations = None
+        if self.gradient_hooks[0].gradients is not None:
+            for h in self.activation_hooks:
+                h.activations = None
+                h.pre_activations = None
         for h in self.gradient_hooks:
             h.gradients = None

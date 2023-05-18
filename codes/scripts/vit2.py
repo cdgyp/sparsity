@@ -1,13 +1,13 @@
 import argparse
-from typing import Any
 from torchvision.datasets import ImageFolder, CIFAR10
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import LambdaLR
+from torch  import nn
 from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
 from ..modules.hooks import ActivationObservationPlugin
-from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights
+from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, SymmetricReLU
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet
 
@@ -28,11 +28,18 @@ parser.add_argument('--p', type=float, default=1)
 parser.add_argument('--batchwise_reported', type=int, default=0)
 parser.add_argument('--warmup_epoch', type=int, default=5)
 parser.add_argument('--initial_lr_ratio', type=float, default=1e-1)
+parser.add_argument('--activation_layer', type=str, default='relu')
+parser.add_argument('--pretrained', type=int, default=1)
 all_args = parser.parse_known_args()
 args = all_args[0]
 
 print('not known params', all_args[1])
 writer, ref_hash = new_experiment(args.title + '_' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
+
+if args.activation_layer == 'relu':
+    MLPBlock.default_activation_layer = nn.ReLU
+elif args.activation_layer == 'symmetric_relu':
+    MLPBlock.default_activation_layer = SymmetricReLU
 
 # args.lr = args.lr / (512 / args.batch_size)
 
@@ -68,7 +75,7 @@ observation = ActivationObservationPlugin(p=args.p, depth=12, batchwise_reported
 
 vit = Model(
     Wrapper(
-        relu_vit_b_16(ViT_B_16_Weights.IMAGENET1K_V1, progress=True, **{
+        relu_vit_b_16(ViT_B_16_Weights.IMAGENET1K_V1 if args.pretrained else None, progress=True, **{
             'dropout': args.dropout
         })
     ),
