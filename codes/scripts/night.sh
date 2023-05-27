@@ -1,4 +1,4 @@
-title='vit9/vit'
+title='vit/vit'
 num_classes=10
 n_epoch=100
 weight_decay=0.00
@@ -7,7 +7,7 @@ batch_size=96
 grad_clip=1
 p=1
 batchwise_reported=0
-activation_layer=symmetric_relu
+activation_layer=relu
 pretrained=0
 
 for optimizer in Adam SGD
