@@ -5,7 +5,7 @@ from einops import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
 from .vit import ViT, FeedForward
-from .relu_vit import MLPBlock
+from .relu_vit import MLPBlock, CustomizedActivation
 
 
 class ActivationHook(Hook):
@@ -43,7 +43,7 @@ class ActivationMapHook(ForwardHook):
         self.pre_activations = input[0]
 
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU]))
+        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU, CustomizedActivation, nn.LeakyReLU]))
 
 class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
@@ -203,7 +203,7 @@ class IdleRecorder(BaseModule):
         return dict()
 
 class ActivationObservationPlugin(Plugin):
-    def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False):
+    def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False, log_per_step=1):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
         self.gradient_hooks: list[MlpGradientHook] = []
@@ -221,6 +221,8 @@ class ActivationObservationPlugin(Plugin):
 
         self.main = None
 
+        self.log_per_step = log_per_step
+
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
         self.gradient_hooks = MlpGradientHook.hook_on_all(main, self.depth)
@@ -233,6 +235,8 @@ class ActivationObservationPlugin(Plugin):
             return res
         if self.iteration < 0:
             return res
+        if self.iteration % self.log_per_step != 0:
+            return res
         
         with torch.no_grad():
             assert self.training
@@ -240,11 +244,16 @@ class ActivationObservationPlugin(Plugin):
                 assert h.handle is not None
                 a = h.activations
                 assert len(a.shape) > 1
-                great_than_zero = (a > 0).float()
-                self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', str(i))
+                great_than_zero = (a.abs() > 0).float()
+                self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', i)
+                self.losses.observe((a > 0).float().mean(), 'activation', 'positive_ratio', i)
+                self.losses.observe((a < 0).float().mean(), 'activation', 'negative_ratio', i)
                 dims = list(range(len(a.shape)))[1:]
-                self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation', 'amplitude', str(i))
+                self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation_amplitude', str(i))
                 self.losses.observe(a.norm(p='fro', dim=[-1, -2]).mean(), 'activation_norms', i)
+
+                self.losses.observe((a.abs() * (a > 0)).sum(), 'activation_amplitude', 'positive', i)
+                self.losses.observe((a.abs() * (a < 0)).sum(), 'activation_amplitude', 'negative', i)
 
                 self.losses.observe(h.pre_activations, 'pre_activation', i)
 
@@ -260,13 +269,15 @@ class ActivationObservationPlugin(Plugin):
             return
         if self.iteration < 0:
             return
+        if self.iteration % self.log_per_step != 0:
+            return
 
         with torch.no_grad():
             assert self.training
             for i,  h in enumerate(self.gradient_hooks):
                 assert h.handle is not None
                 g = h.gradients
-                assert g.shape[1] == self.sizes[i]
+                assert g.shape[1] == self.sizes[i], (g.shape[1], self.sizes[i], i, self.sizes)
 
                 assert self.activation_hooks[i].activations is not None
                 self.samplewise_recorder(g, i, self.activation_hooks[i].activations)
@@ -316,3 +327,94 @@ class ActivationObservationPlugin(Plugin):
                 h.pre_activations = None
         for h in self.gradient_hooks:
             h.gradients = None
+
+
+class GradientNoisePlugin(Plugin):
+    def __init__(self, beta=0.9, log_per_step=1):
+        super().__init__()
+        self.beta = beta
+        self.gradient_average = []
+        self.gradient_variance = []
+        self.main = None
+        self.log_per_step = log_per_step
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+    def after_backward(self):
+        if self.iteration % self.log_per_step != 0:
+            return
+
+        for i, p in enumerate(self.main.parameters()):
+            if len(self.gradient_average) <= i:
+                self.gradient_average.append(0)
+                self.gradient_variance.append(0)
+            if p.grad is not None:
+                self.gradient_average[i] = self.beta * self.gradient_average[i] + (1 - self.beta) * p.grad.flatten()
+                self.gradient_variance[i] = self.beta * self.gradient_variance[i] + (1 - self.beta) * (p.grad.flatten() - self.gradient_average[i]) ** 2
+                
+        average = torch.cat(self.gradient_average).norm(p=2)
+        std = torch.cat(self.gradient_variance).sum().sqrt()
+        self.losses.observe(average, 'gradient_noise', 'norm')
+        self.losses.observe(std, 'gradient_noise', 'std')
+        self.losses.observe(std / (average + 1e-32), 'gradient_noise', 'ratio')
+    
+
+class SimilarityPlugin(Plugin):
+    def __init__(self, log_per_step=1):
+        super().__init__()
+        self.log_per_step = log_per_step
+        self.main = None
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+    
+    def retranspose(self, weight: torch.Tensor):
+            if weight.shape[0] < weight.shape[1]:
+                weight = weight.transpose(0, 1)
+            return weight
+    def calc(self, key_linear: nn.Linear, value_linear: nn.Linear, mlp_index: int):
+        with torch.no_grad():
+            key = self.retranspose(key_linear.weight)
+            value = self.retranspose(value_linear.weight)
+
+            kkT = einsum(
+                key, key,
+                'i d,   j d     ->  i j'
+            ).flatten()
+
+            vvT = einsum(
+                value, value,
+                'i d,   j d     ->  i j'
+            ).flatten()
+            
+            pearson = torch.corrcoef(
+                torch.stack([kkT, vvT], dim=0)
+            )[0, 1]
+
+            self.losses.observe(pearson, 'kkTvvT', 'pearson', mlp_index)
+            self.losses.observe((kkT.sign() == vvT.sign()).float().mean(), 'kkTvvT', 'sign', mlp_index)
+
+            product = kkT * vvT
+            self.losses.observe((product.abs() * (product > 0)).mean(), 'kkTvvT', 'positive', mlp_index)
+            self.losses.observe((product.abs() * (product < 0)).mean(), 'kkTvvT', 'negative', mlp_index)
+            self.losses.observe(((product.abs() * (product > 0)).mean() / (product.abs() * (product < 0) + 1e-32).mean()).log10(), 'kkTvvT', 'log_ratio', mlp_index)
+
+
+
+    def forward(self, *args):
+        if self.iteration % self.log_per_step != 0:
+            return
+        
+        main = self.main
+        mlp_index = 0
+        for module in main.modules():
+            if isinstance(module, MLPBlock):
+                linears = []
+                for submodule in module.modules():
+                    if isinstance(submodule, nn.Linear):
+                        linears.append(submodule)
+                assert len(linears) == 2
+                self.calc(*linears, mlp_index=mlp_index)
+                mlp_index += 1
+                        
+
+        return args[0]
+    
