@@ -418,3 +418,61 @@ class SimilarityPlugin(Plugin):
 
         return args[0]
     
+
+class ParameterChangePlugin(Plugin):
+    def __init__(self, log_per_step=10):
+        super().__init__()
+        self.log_per_step = log_per_step
+        self.main = None
+        self.initial_parameters = None
+
+
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+    
+    def after_backward(self):
+        if self.iteration % self.log_per_step != 0 :
+            return
+
+        with torch.no_grad():
+            new_parameters = torch.nn.utils.convert_parameters.parameters_to_vector(self.main.parameters())
+            if self.initial_parameters is None:
+                self.initial_parameters = new_parameters.clone()
+        
+            self.losses.observe((self.initial_parameters.sign() == new_parameters.sign()).float().mean(), 'parameter_changes', 'sign')
+            self.losses.observe((self.initial_parameters - new_parameters).abs().mean(), 'parameter_changes', 'mean_absolute')
+            self.losses.observe((self.initial_parameters - new_parameters).abs() / (self.initial_parameters.abs() + 1e-32), 'parameter_changes', 'l1_relative')
+
+            if self.iteration % (10 * self.log_per_step) == 0:
+                self.losses.histogram((self.initial_parameters - new_parameters).abs(), 'parameter_changes', 'absolute')
+        
+class ActivationDistributionPlugin(Plugin):
+    def __init__(self, depth_main, log_per_step=10):
+        super().__init__()
+        self.log_per_step = log_per_step
+        self.main = None
+        self.hooks: list[ActivationMapHook] = None
+        self.depth = depth_main
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+        self.hooks = ActivationMapHook.hook_on_all(main, self.depth)
+        self.activations = []
+
+    def do_logs(self):
+        for i, h in enumerate(self.hooks):
+            self.losses.histogram(h.activations.flatten(), 'activation_distribution', i)
+            
+    
+    def forward(self, *args, **kwargs):
+        if self.training:
+            if self.iteration % self.log_per_step != 0:
+                return
+            
+            self.do_logs()
+            self.activations = []
+
+    def clean(self):
+        for h in self.hooks:
+            h.activations = None
+        if self.training:
+            self.activations = []

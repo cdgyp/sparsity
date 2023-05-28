@@ -6,7 +6,7 @@ from torch  import nn
 from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
-from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin
+from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
 from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, SymmetricReLU, SReLU, WeirdLeakyReLU
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet
@@ -53,7 +53,9 @@ else:
 # args.lr = args.lr / (512 / args.batch_size)
 
 train_transforms = transforms.Compose([
-    transforms.Resize(args.image_size),
+    transforms.Resize(args.image_size + 32),
+    transforms.RandomCrop(args.image_size),
+    transforms.RandomHorizontalFlip(),
     transforms.ToTensor()
 ])
 
@@ -91,7 +93,9 @@ vit = Model(
     ERM(),
     observation,
     GradientNoisePlugin(log_per_step=args.log_per_step),
-    SimilarityPlugin(log_per_step=args.log_per_step)
+    SimilarityPlugin(log_per_step=args.log_per_step),
+    ParameterChangePlugin(log_per_step=args.log_per_step),
+    ActivationDistributionPlugin(12, log_per_step=args.log_per_step * 10)
 ).to(device)
 
 def print_and_return(x):

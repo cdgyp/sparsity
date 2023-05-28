@@ -1,6 +1,6 @@
-title='vit/vit'
+title='vit-finetune/vit'
 num_classes=10
-n_epoch=100
+n_epoch=20
 weight_decay=0.00
 dropout=0.0
 batch_size=96
@@ -8,7 +8,7 @@ grad_clip=1
 p=1
 batchwise_reported=0
 activation_layer=relu
-pretrained=0
+pretrained=1
 
 for optimizer in Adam SGD
 do
