@@ -14,13 +14,23 @@ class SymmetricReLU(CustomizedActivation):
         return self.relu(x.abs() - self.half_interval)
 
 class SReLU(CustomizedActivation):
-    def __init__(self, interval=1) -> None:
+    def __init__(self, half_interval=0.5) -> None:
         super().__init__()
-        self.interval = interval
+        self.half_interval = half_interval
     def forward(self, x: torch.Tensor):
-        return x * (x > 0) + (x + self.interval) * (x + self.interval < 0)
-    def new(interval=1):
-        return lambda: SReLU(interval=interval)
+        x = x - self.half_interval
+        return (x - self.half_interval) * (x - self.half_interval > 0) + (x + self.half_interval) * (x + self.half_interval < 0)
+    def new(half_interval=0.5):
+        return lambda: SReLU(half_interval=half_interval)
+
+class Shift(CustomizedActivation):
+    def __init__(self, inner: nn.Module, shift_x=0, shift_y=0) -> None:
+        super().__init__()
+        self.inner = inner
+        self.shift_x = shift_x
+        self.shift_y = shift_y
+    def forward(self, x):
+        return self.inner(x - self.shift_x) + self.shift_y
 
 class WeirdLeakyReLU(CustomizedActivation):
     def __init__(self, alpha_positive=1, alpha_negative=0.001) -> None:
