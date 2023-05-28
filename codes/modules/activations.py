@@ -51,3 +51,11 @@ class DenseReLU(CustomizedActivation):
         return self.relu(-x.abs() + self.half_interval)
     def get_constructor(half_interval=1):
         return lambda: DenseReLU(half_interval=half_interval)
+    
+
+class ActivationPosition(nn.Module):
+    def __init__(self, inner: nn.Module) -> None:
+        super().__init__()
+        self.inner = inner
+    def forward(self, x):
+        return self.inner(x)

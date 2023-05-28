@@ -5,7 +5,7 @@ from einops import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
 from .vit import ViT, FeedForward
-from .relu_vit import MLPBlock, CustomizedActivation
+from .relu_vit import MLPBlock, CustomizedActivation, ActivationPosition
 
 
 class ActivationHook(Hook):
@@ -43,7 +43,7 @@ class ActivationMapHook(ForwardHook):
         self.pre_activations = input[0]
 
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[nn.ReLU, nn.GELU, CustomizedActivation, nn.LeakyReLU]))
+        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[ActivationPosition]))
 
 class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
@@ -444,7 +444,7 @@ class ParameterChangePlugin(Plugin):
             self.losses.observe((self.initial_parameters - new_parameters).abs() / (self.initial_parameters.abs() + 1e-32), 'parameter_changes', 'l1_relative')
 
             if self.iteration % (10 * self.log_per_step) == 0:
-                self.losses.histogram((self.initial_parameters - new_parameters).abs(), 'parameter_changes', 'absolute')
+                self.losses.histogram(self.initial_parameters - new_parameters, 'parameter_changes', 'absolute')
         
 class ActivationDistributionPlugin(Plugin):
     def __init__(self, depth_main, log_per_step=10):
@@ -453,10 +453,11 @@ class ActivationDistributionPlugin(Plugin):
         self.main = None
         self.hooks: list[ActivationMapHook] = None
         self.depth = depth_main
+        self.activations = []
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
         self.hooks = ActivationMapHook.hook_on_all(main, self.depth)
-        self.activations = []
+        print(len(self.hooks))
 
     def do_logs(self):
         for i, h in enumerate(self.hooks):

@@ -7,7 +7,7 @@ from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
 from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
-from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, SymmetricReLU, SReLU, WeirdLeakyReLU, Shift
+from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet
 
@@ -42,19 +42,21 @@ print('not known params', all_args[1])
 writer, ref_hash = new_experiment(args.title + '_' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
 
 if args.activation_layer == 'relu':
-    MLPBlock.default_activation_layer = nn.ReLU
+    default_activation_layer = nn.ReLU
 elif args.activation_layer == 'symmetric_relu':
-    MLPBlock.default_activation_layer = SymmetricReLU
+    default_activation_layer = SymmetricReLU
 elif args.activation_layer == 's_relu':
-    MLPBlock.default_activation_layer = SReLU.new(0.5)
+    default_activation_layer = SReLU.new(0.5)
 elif args.activation_layer == 'leaky_relu':
-    MLPBlock.default_activation_layer = lambda: nn.LeakyReLU(0.1)
+    default_activation_layer = lambda: nn.LeakyReLU(0.1)
 elif args.activation_layer == 'weird_leaky_relu':
-    MLPBlock.default_activation_layer = WeirdLeakyReLU.get_constructor(0.1, 1)
+    default_activation_layer = WeirdLeakyReLU.get_constructor(0.1, 1)
 elif args.activation_layer == 'weird':
-    MLPBlock.default_activation_layer = lambda: Shift(SReLU(args.half_interval), shift_x=args.shift_x, shift_y=args.shift_y)
+    default_activation_layer = lambda: Shift(SReLU(args.half_interval), shift_x=args.shift_x, shift_y=args.shift_y)
 else:
     raise NotImplemented()
+
+MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
 
 # args.lr = args.lr / (512 / args.batch_size)
 
