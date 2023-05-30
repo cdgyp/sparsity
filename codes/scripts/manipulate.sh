@@ -9,7 +9,7 @@ p=1
 batchwise_reported=0
 activation_layer=weird
 pretrained=0
-half_interval=0.2
+half_interval=0.3
 shift_x=0
 shift_y=0
 
