@@ -36,11 +36,13 @@ class ActivationMapHook(ForwardHook):
         super().__init__()
         self.activations: torch.Tensor = None
         self.pre_activations: torch.Tensor = None
+        self.module = None
     def __call__(self, module: nn.Module, input, output):
         assert isinstance(output, torch.Tensor), output
         self.activations = output
         assert isinstance(input, tuple) and len(input) == 1
         self.pre_activations = input[0]
+        self.module = ModuleReference(module)
 
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
         return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[ActivationPosition]))
@@ -447,21 +449,32 @@ class ParameterChangePlugin(Plugin):
                 self.losses.histogram(self.initial_parameters - new_parameters, 'parameter_changes', 'absolute')
         
 class ActivationDistributionPlugin(Plugin):
-    def __init__(self, depth_main, log_per_step=10):
+    def __init__(self, depth_main, log_per_step=10, eps=1e-5):
         super().__init__()
         self.log_per_step = log_per_step
         self.main = None
         self.hooks: list[ActivationMapHook] = None
         self.depth = depth_main
         self.activations = []
+        self.eps = eps
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
         self.hooks = ActivationMapHook.hook_on_all(main, self.depth)
         print(len(self.hooks))
-
+    def fall_within(self, values: torch.Tensor, ranges: torch.Tensor):
+        res = 0
+        for range in ranges:
+            res = res + ((range[0] <= values) & (values <= range[1])).float().mean()
+        return res
     def do_logs(self):
         for i, h in enumerate(self.hooks):
             self.losses.histogram(h.activations.flatten(), 'activation_distribution', i)
+            self.losses.histogram(h.pre_activations.flatten(), 'pre_activation_distribution', i)
+            habitat = h.module.get_habitat()
+            print(habitat)
+
+            self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']), 'pseudo_sparsity', 'pre_activation', i)
+            self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']), 'pseudo_sparsity', 'activation', i)
             
     
     def forward(self, *args, **kwargs):
@@ -475,5 +488,6 @@ class ActivationDistributionPlugin(Plugin):
     def clean(self):
         for h in self.hooks:
             h.activations = None
+            h.pre_activations = None
         if self.training:
             self.activations = []
