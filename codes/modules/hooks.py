@@ -471,7 +471,6 @@ class ActivationDistributionPlugin(Plugin):
             self.losses.histogram(h.activations.flatten(), 'activation_distribution', i)
             self.losses.histogram(h.pre_activations.flatten(), 'pre_activation_distribution', i)
             habitat = h.module.get_habitat()
-            print(habitat)
 
             self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']), 'pseudo_sparsity', 'pre_activation', i)
             self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']), 'pseudo_sparsity', 'activation', i)
