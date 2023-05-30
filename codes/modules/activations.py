@@ -20,7 +20,6 @@ class SReLU(CustomizedActivation):
         super().__init__()
         self.half_interval = abs(half_interval)
     def forward(self, x: torch.Tensor):
-        x = x - self.half_interval
         return (x - self.half_interval) * (x - self.half_interval > 0) + (x + self.half_interval) * (x + self.half_interval < 0)
     def new(half_interval=0.5):
         return lambda: SReLU(half_interval=half_interval)
