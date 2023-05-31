@@ -462,10 +462,10 @@ class ActivationDistributionPlugin(Plugin):
         self.hooks = ActivationMapHook.hook_on_all(main, self.depth)
         print(len(self.hooks))
     def fall_within(self, values: torch.Tensor, ranges: torch.Tensor):
-        res = 0
+        res = torch.zeros_like(values)
         for range in ranges:
-            res = res + ((range[0] <= values) & (values <= range[1])).float().mean()
-        return res
+            res = res | ((range[0] <= values) & (values <= range[1]))
+        return res.float().mean()
     def do_logs(self):
         for i, h in enumerate(self.hooks):
             self.losses.histogram(h.activations.flatten(), 'activation_distribution', i)
