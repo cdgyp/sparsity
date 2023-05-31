@@ -5,7 +5,8 @@ from einops import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
 from .vit import ViT, FeedForward
-from .relu_vit import MLPBlock, CustomizedActivation, ActivationPosition
+from .relu_vit import MLPBlock
+from .activations import CustomizedActivation, ActivationPosition
 
 
 class ActivationHook(Hook):
@@ -344,20 +345,21 @@ class GradientNoisePlugin(Plugin):
     def after_backward(self):
         if self.iteration % self.log_per_step != 0:
             return
-
-        for i, p in enumerate(self.main.parameters()):
-            if len(self.gradient_average) <= i:
-                self.gradient_average.append(0)
-                self.gradient_variance.append(0)
-            if p.grad is not None:
-                self.gradient_average[i] = self.beta * self.gradient_average[i] + (1 - self.beta) * p.grad.flatten()
-                self.gradient_variance[i] = self.beta * self.gradient_variance[i] + (1 - self.beta) * (p.grad.flatten() - self.gradient_average[i]) ** 2
+        
+        with torch.no_grad():
+            for i, p in enumerate(self.main.parameters()):
+                if len(self.gradient_average) <= i:
+                    self.gradient_average.append(torch.tensor([0], device=p.device))
+                    self.gradient_variance.append(torch.tensor([0], device=p.device))
+                if p.grad is not None:
+                    self.gradient_average[i] = self.beta * self.gradient_average[i] + (1 - self.beta) * p.grad.flatten()
+                    self.gradient_variance[i] = self.beta * self.gradient_variance[i] + (1 - self.beta) * (p.grad.flatten() - self.gradient_average[i]) ** 2
                 
-        average = torch.cat(self.gradient_average).norm(p=2)
-        std = torch.cat(self.gradient_variance).sum().sqrt()
-        self.losses.observe(average, 'gradient_noise', 'norm')
-        self.losses.observe(std, 'gradient_noise', 'std')
-        self.losses.observe(std / (average + 1e-32), 'gradient_noise', 'ratio')
+            average = torch.cat(self.gradient_average).norm(p=2)
+            std = torch.cat(self.gradient_variance).sum().sqrt()
+            self.losses.observe(average, 'gradient_noise', 'norm')
+            self.losses.observe(std, 'gradient_noise', 'std')
+            self.losses.observe(std / (average + 1e-32), 'gradient_noise', 'ratio')
     
 
 class SimilarityPlugin(Plugin):
@@ -462,7 +464,7 @@ class ActivationDistributionPlugin(Plugin):
         self.hooks = ActivationMapHook.hook_on_all(main, self.depth)
         print(len(self.hooks))
     def fall_within(self, values: torch.Tensor, ranges: torch.Tensor):
-        res = torch.zeros_like(values)
+        res = torch.zeros_like(values, dtype=torch.bool)
         for range in ranges:
             res = res | ((range[0] <= values) & (values <= range[1]))
         return res.float().mean()

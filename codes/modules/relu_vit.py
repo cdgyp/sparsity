@@ -14,8 +14,6 @@ from torchvision.models._api import register_model, Weights, WeightsEnum
 from torchvision.models._meta import _IMAGENET_CATEGORIES
 from torchvision.models._utils import _ovewrite_named_param, handle_legacy_interface
 
-from .activations import *
-
 
 __all__ = [
     "VisionTransformer",
@@ -44,7 +42,7 @@ class MLPBlock(MLP):
     """Transformer MLP block."""
 
     _version = 2
-    default_activation_layer=SymmetricReLU
+    default_activation_layer=nn.ReLU
 
     def __init__(self, in_dim: int, mlp_dim: int, dropout: float):
         super().__init__(in_dim, [mlp_dim, in_dim], activation_layer=MLPBlock.default_activation_layer, inplace=None, dropout=dropout)
@@ -98,6 +96,7 @@ class EncoderBlock(nn.Module):
         dropout: float,
         attention_dropout: float,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
+        rezero=False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -110,17 +109,33 @@ class EncoderBlock(nn.Module):
         # MLP block
         self.ln_2 = norm_layer(hidden_dim)
         self.mlp = MLPBlock(hidden_dim, mlp_dim, dropout)
+        self.rezero = rezero
+        if self.rezero:
+            self.alpha = nn.Parameter(torch.tensor([0.0]))
 
     def forward(self, input: torch.Tensor):
         torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-        x = self.ln_1(input)
+        if self.rezero:
+            x = input
+        else:
+            x = self.ln_1(input)
         x, _ = self.self_attention(query=x, key=x, value=x, need_weights=False)
         x = self.dropout(x)
-        x = x + input
+        if self.rezero:
+            x = input + self.alpha * x
+            y = x
+        else:
+            x = x + input
+            y = self.ln_2(x)
 
-        y = self.ln_2(x)
+
         y = self.mlp(y)
-        return x + y
+        if self.rezero:
+            z = x + self.alpha * y
+        else:
+            z = x + y
+        
+        return z
 
 
 class Encoder(nn.Module):
@@ -136,6 +151,7 @@ class Encoder(nn.Module):
         dropout: float,
         attention_dropout: float,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
+        rezero=False
     ):
         super().__init__()
         # Note that batch_size is on the first dim because
@@ -151,6 +167,7 @@ class Encoder(nn.Module):
                 dropout,
                 attention_dropout,
                 norm_layer,
+                rezero=rezero
             )
         self.layers = nn.Sequential(layers)
         self.ln = norm_layer(hidden_dim)
@@ -178,6 +195,7 @@ class VisionTransformer(nn.Module):
         representation_size: Optional[int] = None,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         conv_stem_configs: Optional[List[ConvStemConfig]] = None,
+        rezero=False
     ):
         super().__init__()
         _log_api_usage_once(self)
@@ -233,6 +251,7 @@ class VisionTransformer(nn.Module):
             dropout,
             attention_dropout,
             norm_layer,
+            rezero=rezero
         )
         self.seq_length = seq_length
 

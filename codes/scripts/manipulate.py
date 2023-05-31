@@ -7,7 +7,8 @@ from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
 from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
-from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition
+from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
+from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet
 
@@ -34,15 +35,18 @@ parser.add_argument('--log_per_step', type=int, default=10)
 parser.add_argument('--half_interval', type=float, default=0.5)
 parser.add_argument('--shift_x', type=float, default=0)
 parser.add_argument('--shift_y', type=float, default=0)
+parser.add_argument('--careful_bias_initialization', type=int, default=0)
+parser.add_argument('--rezero', type=int, default=0)
 
 all_args = parser.parse_known_args()
 args = all_args[0]
+
 
 print('not known params', all_args[1])
 writer, ref_hash = new_experiment(args.title + '_' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
 
 if args.activation_layer == 'relu':
-    default_activation_layer = nn.ReLU
+    default_activation_layer = CustomizedReLU
 elif args.activation_layer == 'symmetric_relu':
     default_activation_layer = SymmetricReLU
 elif args.activation_layer == 's_relu':
@@ -95,7 +99,9 @@ observation = ActivationObservationPlugin(p=args.p, depth=12, batchwise_reported
 vit = Model(
     Wrapper(
         relu_vit_b_16(ViT_B_16_Weights.IMAGENET1K_V1 if args.pretrained else None, progress=True, **{
-            'dropout': args.dropout
+            'dropout': args.dropout,
+#            'num_classes': args.num_classes if not args.pretrained else 1000,
+            'rezero': bool(args.rezero) if not args.pretrained else False
         })
     ),
     ERM(),
@@ -105,6 +111,9 @@ vit = Model(
     ParameterChangePlugin(log_per_step=args.log_per_step),
     ActivationDistributionPlugin(12, log_per_step=args.log_per_step * 10)
 ).to(device)
+
+if args.careful_bias_initialization:
+    careful_bias_initialization(vit, args.shift_x)
 
 def print_and_return(x):
     print(x)
@@ -126,8 +135,8 @@ training = Training(
     scheduler_args={
         'lr_lambda': lambda epoch: args.initial_lr_ratio + min(epoch / len(train_dataloader) / args.warmup_epoch, 1) * (1 - args.initial_lr_ratio),
         'last_epoch': args.warmup_epoch,
-    },
-    log_per_step=args.log_per_step
+    } if not args.rezero else None,
+    log_per_step=args.log_per_step,
 )
 
 start_tensorboard_server(writer.log_dir)
