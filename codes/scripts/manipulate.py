@@ -8,7 +8,7 @@ from torchvision import transforms
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
 from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
 from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
-from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU
+from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU, SquaredReLU, SShaped
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet
 
@@ -35,8 +35,11 @@ parser.add_argument('--log_per_step', type=int, default=10)
 parser.add_argument('--half_interval', type=float, default=0.5)
 parser.add_argument('--shift_x', type=float, default=0)
 parser.add_argument('--shift_y', type=float, default=0)
+parser.add_argument('--alpha_x', type=float, default=1)
+parser.add_argument('--alpha_y', type=float, default=1)
 parser.add_argument('--careful_bias_initialization', type=int, default=0)
 parser.add_argument('--rezero', type=int, default=0)
+parser.add_argument('--implicit_adversarial_samples', type=int, default=0)
 
 all_args = parser.parse_known_args()
 args = all_args[0]
@@ -56,11 +59,15 @@ elif args.activation_layer == 'leaky_relu':
 elif args.activation_layer == 'weird_leaky_relu':
     default_activation_layer = WeirdLeakyReLU.get_constructor(0.1, 1)
 elif args.activation_layer == 'weird':
-    default_activation_layer = lambda: Shift(SReLU(args.half_interval), shift_x=args.shift_x, shift_y=args.shift_y)
+    default_activation_layer = lambda: SReLU(args.half_interval)
+elif 'relu2' in args.activation_layer or 'squared_relu' in args.activation_layer:
+    default_activation_layer = SquaredReLU
+    if 'weird' in args.activation_layer:
+        default_activation_layer = lambda: SShaped(SquaredReLU(), args.half_interval)
 else:
     raise NotImplemented()
 
-MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
+MLPBlock.default_activation_layer = lambda: ActivationPosition(Shift(default_activation_layer(), shift_x=args.shift_x, shift_y=args.shift_y, alpha_x=args.alpha_x, alpha_y=args.alpha_y))
 
 # args.lr = args.lr / (512 / args.batch_size)
 
@@ -100,8 +107,9 @@ vit = Model(
     Wrapper(
         relu_vit_b_16(ViT_B_16_Weights.IMAGENET1K_V1 if args.pretrained else None, progress=True, **{
             'dropout': args.dropout,
-#            'num_classes': args.num_classes if not args.pretrained else 1000,
-            'rezero': bool(args.rezero) if not args.pretrained else False
+            'num_classes': args.num_classes if not args.pretrained else 1000,
+            'rezero': bool(args.rezero) if not args.pretrained else False,
+            'implicit_adversarial_samples': args.implicit_adversarial_samples
         })
     ),
     ERM(),
@@ -109,7 +117,7 @@ vit = Model(
     GradientNoisePlugin(log_per_step=args.log_per_step),
     SimilarityPlugin(log_per_step=args.log_per_step),
     ParameterChangePlugin(log_per_step=args.log_per_step),
-    ActivationDistributionPlugin(12, log_per_step=args.log_per_step * 10)
+    ActivationDistributionPlugin(12, log_per_step=args.log_per_step * 50)
 ).to(device)
 
 if args.careful_bias_initialization:
@@ -128,7 +136,7 @@ training = Training(
     lr=args.lr,
     writer=writer,
     test_every_epoch=1,
-    save_every_epoch=100,
+    save_every_epoch=20,
     optimizer=args.optimizer,
     weight_decay=args.weight_decay,
     gradient_clipping=args.grad_clipping,
