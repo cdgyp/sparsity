@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from .relu_vit import MLPBlock
 
 class CustomizedActivation(nn.Module):
     def __init__(self) -> None:
@@ -44,13 +43,15 @@ class SReLU(CustomizedActivation):
         }
 
 class Shift(CustomizedActivation):
-    def __init__(self, inner: nn.Module, shift_x=0, shift_y=0) -> None:
+    def __init__(self, inner: nn.Module, shift_x=0, shift_y=0, alpha_x=1.0, alpha_y=1.0) -> None:
         super().__init__()
         self.inner = inner
         self.shift_x = shift_x
         self.shift_y = shift_y
+        self.alpha_x = alpha_x
+        self.alpha_y = alpha_y
     def forward(self, x):
-        return self.inner(x - self.shift_x) + self.shift_y
+        return  self.alpha_y * self.inner(self.alpha_x * (x - self.shift_x)) + self.shift_y
     def get_habitat(self):
         inner_habitat = self.inner.get_habitat()
         return {
@@ -78,6 +79,34 @@ class DenseReLU(CustomizedActivation):
     def get_constructor(half_interval=1):
         return lambda: DenseReLU(half_interval=half_interval)
     
+class SquaredReLU(CustomizedActivation):
+    def forward(self, x: torch.Tensor):
+        return torch.relu(x) ** 2
+    def get_habitat(self):
+        return {
+            "x": torch.tensor([[-1e32, 0]]),
+            "y": torch.tensor([[-1e-6, 1e-6]])
+        }
+    
+class SShaped(CustomizedActivation):
+    def __init__(self, inner: CustomizedActivation, half_interval=0.5) -> None:
+        super().__init__()
+        self.inner = inner
+        self.half_interval = abs(half_interval)
+    def forward(self, x: torch.Tensor):
+        return self.inner(x - self.half_interval) - self.inner(-x - self.half_interval)
+    def get_habitat(self):
+        inner_habitat = self.inner.get_habitat()
+        inner_x_habitat = inner_habitat['x']
+        assert len(inner_x_habitat) == 1, inner_x_habitat
+        assert inner_x_habitat[0, 0] <= -100 and inner_x_habitat[0, 1] >= 0
+        x_habitat = torch.tensor([[-(inner_x_habitat[0, 1] + self.half_interval), inner_x_habitat[0, 1] + self.half_interval]])
+        inner_y_habitat = inner_habitat['y']
+        y_habitat = torch.cat([inner_y_habitat, -inner_y_habitat], dim=0)
+        return {
+            'x': x_habitat,
+            'y': y_habitat
+        }
 
 class ActivationPosition(nn.Module):
     def __init__(self, inner: nn.Module) -> None:
@@ -88,11 +117,13 @@ class ActivationPosition(nn.Module):
     def get_habitat(self):
         return self.inner.get_habitat()
 
-
-def careful_bias_initialization(module: nn.Module, shift_x: float):
-    with torch.no_grad():
-        for name, m in module.named_modules():
-            if isinstance(m, MLPBlock):
-                keys = m[0]
-                assert isinstance(keys, nn.Linear)
-                keys.bias.add_(shift_x)
+try:
+    from .relu_vit import MLPBlock
+    def careful_bias_initialization(module: nn.Module, shift_x: float):
+        with torch.no_grad():
+            for name, m in module.named_modules():
+                if isinstance(m, MLPBlock):
+                    keys = m[0]
+                    assert isinstance(keys, nn.Linear)
+                    keys.bias.add_(shift_x)
+except: pass
