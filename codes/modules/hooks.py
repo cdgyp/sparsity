@@ -447,7 +447,7 @@ class ParameterChangePlugin(Plugin):
             self.losses.observe((self.initial_parameters - new_parameters).abs().mean(), 'parameter_changes', 'mean_absolute')
             self.losses.observe((self.initial_parameters - new_parameters).abs() / (self.initial_parameters.abs() + 1e-32), 'parameter_changes', 'l1_relative')
 
-            if self.iteration % (10 * self.log_per_step) == 0:
+            if self.iteration % (35 * self.log_per_step) == 0:
                 self.losses.histogram(self.initial_parameters - new_parameters, 'parameter_changes', 'absolute')
         
 class ActivationDistributionPlugin(Plugin):
@@ -470,12 +470,14 @@ class ActivationDistributionPlugin(Plugin):
         return res.float().mean()
     def do_logs(self):
         for i, h in enumerate(self.hooks):
-            self.losses.histogram(h.activations.flatten(), 'activation_distribution', i)
-            self.losses.histogram(h.pre_activations.flatten(), 'pre_activation_distribution', i)
-            habitat = h.module.get_habitat()
-
-            self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']), 'pseudo_sparsity', 'pre_activation', i)
-            self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']), 'pseudo_sparsity', 'activation', i)
+            if self.iteration % (self.log_per_step * 35) == 0:
+                self.losses.histogram(h.activations.flatten(), 'activation_distribution', i)
+                self.losses.histogram(h.pre_activations.flatten(), 'pre_activation_distribution', i)
+            
+            if self.iteration % self.log_per_step == 0:
+                habitat = h.module.get_habitat()
+                self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']), 'pseudo_sparsity', 'pre_activation', i)
+                self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']), 'pseudo_sparsity', 'activation', i)
             
     
     def forward(self, *args, **kwargs):
