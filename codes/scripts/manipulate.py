@@ -117,7 +117,7 @@ vit = Model(
     GradientNoisePlugin(log_per_step=args.log_per_step),
     SimilarityPlugin(log_per_step=args.log_per_step),
     ParameterChangePlugin(log_per_step=args.log_per_step),
-    ActivationDistributionPlugin(12, log_per_step=args.log_per_step * 50)
+    ActivationDistributionPlugin(12, log_per_step=args.log_per_step)
 ).to(device)
 
 if args.careful_bias_initialization:
