@@ -17,7 +17,9 @@ class CustomizedReLU(CustomizedActivation):
     def get_habitat(self):
         return {
             "x": torch.tensor([[-1e32, 0]]),
-            "y": torch.tensor([[-1e-6, 1e-6]])
+            "y": torch.tensor([[-1e-6, 1e-6]]),
+            "view_x": torch.tensor([[-5, 5]]),
+            "view_y": torch.tensor([[-5, 5]])
         }
 
 class SymmetricReLU(CustomizedActivation):
@@ -56,7 +58,9 @@ class Shift(CustomizedActivation):
         inner_habitat = self.inner.get_habitat()
         return {
             'x': inner_habitat['x'] + self.shift_x,
-            'y': inner_habitat['y'] + self.shift_y
+            'y': inner_habitat['y'] + self.shift_y,
+            'view_x': inner_habitat['view_x'] + self.shift_x,
+            'view_y': inner_habitat['view_y'] + self.shift_y
         }
 
 class WeirdLeakyReLU(CustomizedActivation):
@@ -85,7 +89,21 @@ class SquaredReLU(CustomizedActivation):
     def get_habitat(self):
         return {
             "x": torch.tensor([[-1e32, 0]]),
-            "y": torch.tensor([[-1e-6, 1e-6]])
+            "y": torch.tensor([[-1e-6, 1e-6]]),
+            "view_x": torch.tensor([[-5, 5]]),
+            "view_y": torch.tensor([[-5, 5]])
+        }
+
+class JumpingSquaredReLU(CustomizedActivation):
+    def forward(self, x):
+        return (x > 0) * ((x + 1)**2 - 1) / 2
+    
+    def get_habitat(self):
+        return {
+            "x": torch.tensor([[-1e32, 0]]),
+            "y": torch.tensor([[-1e-6, 1e-6]]),
+            "view_x": torch.tensor([[-5, 5]]),
+            "view_y": torch.tensor([[-5, 5]])
         }
     
 class SShaped(CustomizedActivation):
@@ -103,9 +121,13 @@ class SShaped(CustomizedActivation):
         x_habitat = torch.tensor([[-(inner_x_habitat[0, 1] + self.half_interval), inner_x_habitat[0, 1] + self.half_interval]])
         inner_y_habitat = inner_habitat['y']
         y_habitat = torch.cat([inner_y_habitat, -inner_y_habitat], dim=0)
+
+        view_y = torch.cat([inner_habitat['view_y'], -inner_habitat['view_y']])
         return {
             'x': x_habitat,
-            'y': y_habitat
+            'y': y_habitat,
+            'view_x': x_habitat * 3,
+            'view_y': torch.tensor([[view_y.min().item(), view_y.max().item()]])
         }
 
 class ActivationPosition(nn.Module):
