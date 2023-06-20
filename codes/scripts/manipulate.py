@@ -1,5 +1,6 @@
 import argparse
-from torchvision.datasets import ImageFolder, CIFAR10
+import torch
+from torchvision.datasets import ImageFolder, CIFAR10, ImageNet
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import LambdaLR
 from torch  import nn
@@ -8,7 +9,7 @@ from torchvision import transforms
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
 from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
 from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
-from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU, SquaredReLU, SShaped
+from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU, SquaredReLU, SShaped, JumpingSquaredReLU
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet
 
@@ -40,6 +41,7 @@ parser.add_argument('--alpha_y', type=float, default=1)
 parser.add_argument('--careful_bias_initialization', type=int, default=0)
 parser.add_argument('--rezero', type=int, default=0)
 parser.add_argument('--implicit_adversarial_samples', type=int, default=0)
+parser.add_argument('--dataset', type=str, default='cifar10')
 
 all_args = parser.parse_known_args()
 args = all_args[0]
@@ -59,11 +61,15 @@ elif args.activation_layer == 'leaky_relu':
 elif args.activation_layer == 'weird_leaky_relu':
     default_activation_layer = WeirdLeakyReLU.get_constructor(0.1, 1)
 elif args.activation_layer == 'weird':
-    default_activation_layer = lambda: SReLU(args.half_interval)
-elif 'relu2' in args.activation_layer or 'squared_relu' in args.activation_layer:
+    default_activation_layer = lambda: SShaped(CustomizedReLU(), args.half_interval)
+elif ('relu2' in args.activation_layer or 'squared_relu' in args.activation_layer) and 'jump' not in args.activation_layer:
     default_activation_layer = SquaredReLU
     if 'weird' in args.activation_layer:
         default_activation_layer = lambda: SShaped(SquaredReLU(), args.half_interval)
+elif 'jumping' in args.activation_layer:
+    default_activation_layer = JumpingSquaredReLU
+    if 'weird' in args.activation_layer:
+        default_activation_layer = lambda: SShaped(JumpingSquaredReLU(), args.half_interval)
 else:
     raise NotImplemented()
 
@@ -83,8 +89,13 @@ test_transforms = transforms.Compose([
     transforms.ToTensor()
 ])
 
-train_dataset = CIFAR10('/data/pz/sparsity/cifar10', True, transform=train_transforms, download=True)
-test_dataset = CIFAR10('/data/pz/sparsity/cifar10', False, transform=test_transforms, download=True)
+if args.dataset == 'cifar10':
+    train_dataset = CIFAR10('/data/pz/sparsity/cifar10', True, transform=train_transforms, download=True)
+    test_dataset = CIFAR10('/data/pz/sparsity/cifar10', False, transform=test_transforms, download=True)
+elif args.dataset == 'imagenet1k':
+    train_dataset = ImageNet('/data/pz/imagenet256', 'train', transform=train_transforms)
+    test_dataset = ImageNet('/data/pz/imagenet256', 'test', transform=train_transforms)
+
 # train_dataset = MiniImagenet('/data/datasets/miniimagenet', 'train', args.image_size)
 # test_dataset = MiniImagenet('/data/datasets/miniimagenet', 'test', args.image_size)
 

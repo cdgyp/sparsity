@@ -3,7 +3,7 @@ import torch.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 
-from codes.modules.activations import SReLU, WeirdLeakyReLU, Shift, SquaredReLU, SShaped
+from codes.modules.activations import SReLU, WeirdLeakyReLU, Shift, SquaredReLU, SShaped, JumpingSquaredReLU
 
 def save_activation_function_plot(activation_fn, save_path, x_range=[-2, 2]):
     x = torch.linspace(*x_range, 100, requires_grad=True)
@@ -38,3 +38,4 @@ save_activation_function_plot(weird, 'pic/wired.jpg', [-4, 4])
 weird_relu2 = Shift(SShaped(SquaredReLU(), 1.5), +1.6, +1.6)
 print(weird_relu2.get_habitat())
 save_activation_function_plot(weird_relu2, 'pic/wired_relu2.jpg', [-4, 4])
+save_activation_function_plot(JumpingSquaredReLU(), 'pic/jumping_relu2.jpg', [-4, 4])
