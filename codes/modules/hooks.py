@@ -475,9 +475,10 @@ class ActivationDistributionPlugin(Plugin):
                 self.losses.histogram(h.activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
                 self.losses.histogram(h.pre_activations.flatten().clamp(min=habitat['view_x'][0, 0].item(), max=habitat['view_x'][0, 1].item()), 'pre_activation_distribution', i, bins=200)
             
-            if self.iteration % self.log_per_step == 0:
-                self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']), 'pseudo_sparsity', 'pre_activation', i)
-                self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']), 'pseudo_sparsity', 'activation', i)
+            if self.iteration % self.log_per_step == 0 or not self.training:
+                status = 'train' if self.training else 'test'
+                self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_({status})', 'pre_activation', i)
+                self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']).mean(), f'activation_concentration_({status})', 'activation', i)
             
     
     def forward(self, *args, **kwargs):
