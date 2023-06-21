@@ -2,3 +2,6 @@ __pycache__
 runs
 ***.pdf
 pic
+./data/***
+!***/.gitkeep
+data/imagenet1k256
