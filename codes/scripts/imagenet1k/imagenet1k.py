@@ -2,6 +2,7 @@ import datetime
 import os
 import time
 import warnings
+import math
 
 import torch
 import torch.utils.data
@@ -17,32 +18,49 @@ from ...base import LossManager, Model
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
     model.train()
-    metric_logger = utils.MetricLogger(delimiter="  ")
+    metric_logger = utils.MetricLogger(delimiter="  ", device=device)
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
     metric_logger.add_meter("img/s", utils.SmoothedValue(window_size=10, fmt="{value}"))
-    if isinstance(model, Model) is not None: model.losses.reset()
+    if isinstance(model, Model): model.losses.reset()
 
     header = f"Epoch: [{epoch}]"
     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         start_time = time.time()
         image, target = image.to(device), target.to(device)
-        with torch.cuda.amp.autocast(enabled=scaler is not None):
-            output = model(image)
-            loss = criterion(output, target)
-
+        image: torch.Tensor; target: torch.Tensor
+        assert args.batch_size % args.physical_batch_size == 0
+        chunks = int(math.ceil(args.batch_size // args.physical_batch_size))
+        output = []; loss = []
         optimizer.zero_grad()
+        for minibatch_image, minibatch_target in zip(image.chunk(chunks, dim=0), target.chunk(chunks, dim=0)):
+            with torch.cuda.amp.autocast(enabled=scaler is not None):
+                minibatch_output = model(minibatch_image)
+                minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
+
+                if scaler is not None:
+                    scaler.scale(minibatch_loss).backward()
+                else:
+                    minibatch_loss.backward()
+            output.append(minibatch_output);loss.append(minibatch_loss)
+        output = torch.cat(output, dim=0); loss = torch.stack(loss, dim=0).sum()
+
+
         if scaler is not None:
-            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             if args.clip_grad_norm is not None:
                 # we should unscale the gradients of optimizer's assigned params if do gradient clipping
-                scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+            
+            if isinstance(model, Model): model.after_backward()
+
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss.backward()
             if args.clip_grad_norm is not None:
                 nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+
+            if isinstance(model, Model): model.after_backward()
+
             optimizer.step()
 
         if model_ema and i % args.model_ema_steps == 0:
@@ -59,6 +77,9 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
         metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
 
         if isinstance(model, Model):
+            model.losses.observe(loss, 'loss')
+            model.losses.observe(acc1 / 100, 'acc', 1)
+            model.losses.observe(acc5 / 100, 'acc', 5)
             if model.iteration % args.log_per_step == 0:
                 model.losses.log_losses(model.iteration)
             model.iteration += 1
@@ -92,7 +113,7 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
 
     num_processed_samples = utils.reduce_across_processes(num_processed_samples)
     if (
-        hasattr(data_loader.dataset, "__len__")
+        False and hasattr(data_loader.dataset, "__len__")
         and len(data_loader.dataset) != num_processed_samples
         and torch.distributed.get_rank() == 0
     ):
@@ -107,6 +128,8 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     metric_logger.synchronize_between_processes()
 
     if isinstance(model, Model):
+        model.losses.observe(metric_logger.acc1.global_avg, 'test_acc', 1)
+        model.losses.observe(metric_logger.acc5.global_avg, 'test_acc', 5)
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.reset()
         model.epoch += 1
@@ -214,11 +237,10 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
     from ...base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
     from ...modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
     from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, ImplicitAdversarialSample
-    from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition
-    observation = ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step)
+    from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU 
     sparsified = (model_type == 'sparsified')
 
-    writer, _ = new_experiment('ImageNet1K' + '_' + f'{(model_type)}', None, dir_to_runs='runs')
+    writer, _ = new_experiment('imagenet1k/ImageNet1K' + '_' + f'{(model_type)}', None, dir_to_runs='runs')
 
     if sparsified:
         default_activation_layer = JumpingSquaredReLU
@@ -227,17 +249,16 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
     MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
     model = Model(
         Wrapper(
-            relu_vit_b_16(ViT_B_16_Weights.IMAGENET1K_V1, progress=True, **{
+            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1, progress=True, **{
                 'num_classes': 1000,
                 'rezero': False,
                 'implicit_adversarial_samples': sparsified
             })
         ),
-        ERM(),
-        observation,
-        GradientNoisePlugin(log_per_step=args.log_per_step),
+        ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
+        # GradientNoisePlugin(log_per_step=args.log_per_step),
         SimilarityPlugin(log_per_step=args.log_per_step),
-        ParameterChangePlugin(log_per_step=args.log_per_step),
+        # ParameterChangePlugin(log_per_step=args.log_per_step),
         ActivationDistributionPlugin(12, log_per_step=args.log_per_step)
     ).to(args.device)
 
@@ -250,7 +271,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
         # make parameters of dynamic modules of implicit adversarial samples ready
         with torch.no_grad():
             X, Y = next(iter(dataloader))
-            pred = model(X.to(args.device))
+            pred = model(X.to(args.device)[:32])
 
     return model
 
@@ -297,7 +318,7 @@ def main(args):
         collate_fn=collate_fn,
     )
     data_loader_test = torch.utils.data.DataLoader(
-        dataset_test, batch_size=args.batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True
+        dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True
     )
 
     print("Creating model")
@@ -306,6 +327,7 @@ def main(args):
     else:
         model = torchvision.models.get_model(args.model, weights=args.weights, num_classes=num_classes)
     model.to(device)
+
 
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -323,6 +345,7 @@ def main(args):
         args.weight_decay,
         norm_weight_decay=args.norm_weight_decay,
         custom_keys_weight_decay=custom_keys_weight_decay if len(custom_keys_weight_decay) > 0 else None,
+        initial_lr=args.lr,
     )
 
     opt_name = args.opt.lower()
@@ -350,7 +373,9 @@ def main(args):
         main_lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
     elif args.lr_scheduler == "cosineannealinglr":
         main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs - args.lr_warmup_epochs, eta_min=args.lr_min
+            optimizer, T_max=args.epochs - args.lr_warmup_epochs, eta_min=args.lr_min, 
+            last_epoch=args.start_epoch,
+            verbose=True
         )
     elif args.lr_scheduler == "exponentiallr":
         main_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.lr_gamma)
@@ -460,6 +485,7 @@ def get_args_parser(add_help=True):
     parser.add_argument(
         "-b", "--batch-size", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
     )
+    parser.add_argument("--physical-batch-size", default=None, type=int)
     parser.add_argument("--epochs", default=90, type=int, metavar="N", help="number of total epochs to run")
     parser.add_argument(
         "-j", "--workers", default=16, type=int, metavar="N", help="number of data loading workers (default: 16)"
@@ -578,7 +604,7 @@ def get_args_parser(add_help=True):
     )
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
-    parser.add_argument("--log_per_step", type=str, default=10, help="the number of steps between two logging")
+    parser.add_argument("--log_per_step", type=int, default=10, help="the number of steps between two logging")
     return parser
 
 

@@ -67,9 +67,10 @@ class SmoothedValue:
 
 
 class MetricLogger:
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\t", device=None):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.device=device
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
@@ -140,7 +141,7 @@ class MetricLogger:
                             meters=str(self),
                             time=str(iter_time),
                             data=str(data_time),
-                            memory=torch.cuda.max_memory_allocated() / MB,
+                            memory=torch.cuda.max_memory_allocated(device=self.device) / MB,
                         )
                     )
                 else:
@@ -409,6 +410,7 @@ def set_weight_decay(
     norm_weight_decay: Optional[float] = None,
     norm_classes: Optional[List[type]] = None,
     custom_keys_weight_decay: Optional[List[Tuple[str, float]]] = None,
+    initial_lr: float=None
 ):
     if not norm_classes:
         norm_classes = [
@@ -461,5 +463,5 @@ def set_weight_decay(
     param_groups = []
     for key in params:
         if len(params[key]) > 0:
-            param_groups.append({"params": params[key], "weight_decay": params_weight_decay[key]})
+            param_groups.append({"params": params[key], "weight_decay": params_weight_decay[key], "initial_lr": initial_lr})
     return param_groups
