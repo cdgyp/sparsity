@@ -272,7 +272,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
         # make parameters of dynamic modules of implicit adversarial samples ready
         with torch.no_grad():
             X, Y = next(iter(dataloader))
-            pred = model(X.to(args.device)[:32])
+            pred = model(X.to(args.device)[:args.physical_batch_size])
 
     return model
 
