@@ -206,7 +206,7 @@ class IdleRecorder(BaseModule):
         return dict()
 
 class ActivationObservationPlugin(Plugin):
-    def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False, log_per_step=1):
+    def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
         self.gradient_hooks: list[MlpGradientHook] = []
@@ -225,6 +225,7 @@ class ActivationObservationPlugin(Plugin):
         self.main = None
 
         self.log_per_step = log_per_step
+        self.pre_activation_only = pre_activation_only
 
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
@@ -245,29 +246,31 @@ class ActivationObservationPlugin(Plugin):
             assert self.training
             for i, h in enumerate(self.activation_hooks):
                 assert h.handle is not None
-                a = h.activations
-                assert len(a.shape) > 1
-                great_than_zero = (a.abs() > 0).float()
-                self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', i)
-                self.losses.observe((a > 0).float().mean(), 'activation', 'positive_ratio', i)
-                self.losses.observe((a < 0).float().mean(), 'activation', 'negative_ratio', i)
-                dims = list(range(len(a.shape)))[1:]
-                self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation_amplitude', str(i))
-                self.losses.observe(a.norm(p='fro', dim=[-1, -2]).mean(), 'activation_norms', i)
+                self.losses.observe(h.pre_activations.mean(), 'pre_activation', i)
+                if self.pre_activation_only:
+                    a = h.activations
+                    assert len(a.shape) > 1
+                    great_than_zero = (a.abs() > 0).float()
+                    self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', i)
+                    self.losses.observe((a > 0).float().mean(), 'activation', 'positive_ratio', i)
+                    self.losses.observe((a < 0).float().mean(), 'activation', 'negative_ratio', i)
+                    dims = list(range(len(a.shape)))[1:]
+                    self.losses.observe((a.abs() * great_than_zero).sum(dim=dims) / great_than_zero.sum(dim=dims), 'activation_amplitude', str(i))
+                    self.losses.observe(a.norm(p='fro', dim=[-1, -2]).mean(), 'activation_norms', i)
 
-                self.losses.observe((a.abs() * (a > 0)).sum(), 'activation_amplitude', 'positive', i)
-                self.losses.observe((a.abs() * (a < 0)).sum(), 'activation_amplitude', 'negative', i)
+                    self.losses.observe((a.abs() * (a > 0)).sum(), 'activation_amplitude', 'positive', i)
+                    self.losses.observe((a.abs() * (a < 0)).sum(), 'activation_amplitude', 'negative', i)
 
-                self.losses.observe(h.pre_activations, 'pre_activation', i)
 
-                if i >= len(self.sizes):
-                    self.sizes.append(a.shape[1])
-                self.sizes[i] = a.shape[1]
-                assert len(self.sizes) > i
+                    if i >= len(self.sizes):
+                        self.sizes.append(a.shape[1])
+                    self.sizes[i] = a.shape[1]
+                    assert len(self.sizes) > i
 
         return res
     def after_backward(self):
-
+        if self.pre_activation_only:
+            return
         if not self.training:
             return
         if self.iteration < 0:
@@ -482,13 +485,12 @@ class ActivationDistributionPlugin(Plugin):
             
     
     def forward(self, *args, **kwargs):
-        if self.training:
-            if self.iteration % self.log_per_step != 0:
-                return
+        if self.iteration % self.log_per_step != 0 and self.training:
+            return
             
-            with torch.no_grad():
-                self.do_logs()
-                self.activations = []
+        with torch.no_grad():
+            self.do_logs()
+            self.activations = []
 
     def clean(self):
         for h in self.hooks:
