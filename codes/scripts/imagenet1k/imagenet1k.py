@@ -266,6 +266,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
     model.epoch = 0
     model.losses = LossManager(writer=writer)
     start_tensorboard_server(writer.log_dir)
+    args.output_dir = os.path.join(writer.log_dir, 'save')
 
     if sparsified:
         # make parameters of dynamic modules of implicit adversarial samples ready
