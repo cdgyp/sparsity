@@ -22,6 +22,21 @@ class CustomizedReLU(CustomizedActivation):
             "view_y": torch.tensor([[-5, 5]])
         }
 
+class CustomizedGELU(CustomizedActivation):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inner = nn.GELU()
+    def forward(self, x):
+        return self.inner(x)
+    
+    def get_habitat(self):
+        return {
+            "x": torch.tensor([[-1e32, -1]]),
+            "y": torch.tensor([[-1e-6, 1e-6]]),
+            "view_x": torch.tensor([[-5, 5]]),
+            "view_y": torch.tensor([[-5, 5]])
+        }
+
 class SymmetricReLU(CustomizedActivation):
     def __init__(self, half_interval=1) -> None:
         super().__init__()
@@ -96,7 +111,7 @@ class SquaredReLU(CustomizedActivation):
 
 class JumpingSquaredReLU(CustomizedActivation):
     def forward(self, x):
-        return (x > 0) * ((x + 1)**2 - 1) / 2
+        return (x >= 0) * ((x + 1)**2 - 1) / 2
     
     def get_habitat(self):
         return {
