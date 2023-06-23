@@ -128,8 +128,8 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     metric_logger.synchronize_between_processes()
 
     if isinstance(model, Model):
-        model.losses.observe(metric_logger.acc1.global_avg, 'test_acc', 1)
-        model.losses.observe(metric_logger.acc5.global_avg, 'test_acc', 5)
+        model.losses.observe(metric_logger.acc1.global_avg / 100, 'test_acc', 1)
+        model.losses.observe(metric_logger.acc5.global_avg / 100, 'test_acc', 5)
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.reset()
         model.epoch += 1
@@ -240,7 +240,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
     from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU 
     sparsified = (model_type == 'sparsified')
 
-    writer, _ = new_experiment('imagenet1k/ImageNet1K' + '_' + f'{(model_type)}', None, dir_to_runs='runs')
+    writer, _ = new_experiment('imagenet1k/' + args.title + '/' + f'{(model_type)}', None, dir_to_runs='runs')
 
     if sparsified:
         default_activation_layer = JumpingSquaredReLU
@@ -249,7 +249,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
     MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
     model = Model(
         Wrapper(
-            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1, progress=True, **{
+            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, **{
                 'num_classes': 1000,
                 'rezero': False,
                 'implicit_adversarial_samples': sparsified
@@ -279,6 +279,12 @@ def get_model(model_type: str, dataloader: DataLoader, args=None):
 
 
 def main(args):
+    if args.physical_batch_size is None:
+        args.physical_batch_size = args.batch_size
+    if args.physical_epochs is None:
+        args.physical_epochs = args.epochs
+    if args.from_scratch:
+        args.start_epoch = 0
     if args.output_dir:
         utils.mkdir(args.output_dir)
 
@@ -317,9 +323,10 @@ def main(args):
         num_workers=args.workers,
         pin_memory=True,
         collate_fn=collate_fn,
+        drop_last=True,
     )
     data_loader_test = torch.utils.data.DataLoader(
-        dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True
+        dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True, drop_last=True
     )
 
     print("Creating model")
@@ -338,6 +345,7 @@ def main(args):
     custom_keys_weight_decay = []
     if args.bias_weight_decay is not None:
         custom_keys_weight_decay.append(("bias", args.bias_weight_decay))
+    # custom_keys_weight_decay.append(("biases", 0)) # no weight decay for the first one of dual biases so that it moves freely in flat minima
     if args.transformer_embedding_decay is not None:
         for key in ["class_token", "position_embedding", "relative_position_bias_table"]:
             custom_keys_weight_decay.append((key, args.transformer_embedding_decay))
@@ -364,8 +372,10 @@ def main(args):
         )
     elif opt_name == "adamw":
         optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
+    elif opt_name == "adam":
+        optimizer = torch.optim.Adam(parameters, lr=args.lr, weight_decay=args.weight_decay)
     else:
-        raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop and AdamW are supported.")
+        raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop, AdamW and Adam are supported.")
 
     scaler = torch.cuda.amp.GradScaler() if args.amp else None
 
@@ -447,7 +457,7 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.start_epoch, args.physical_epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
@@ -480,14 +490,17 @@ def get_args_parser(add_help=True):
 
     parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
 
+    parser.add_argument("--title", type=str, default="ImageNet1K")
+
     parser.add_argument("--data-path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
     parser.add_argument("--model", default="vanilla", type=str, help="model name")
     parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
     parser.add_argument(
         "-b", "--batch-size", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
     )
-    parser.add_argument("--physical-batch-size", default=None, type=int)
-    parser.add_argument("--epochs", default=90, type=int, metavar="N", help="number of total epochs to run")
+    parser.add_argument("--physical-batch-size", default=None, type=int, help="size of mini-batches (default: None, same value as --batch-size)")
+    parser.add_argument("--epochs", default=90, type=int, metavar="N", help="(logical) number of total epochs to run")
+    parser.add_argument("--physical-epochs", default=None, type=int, help="actual number of total epochs to run (default: None, same value as --epochs)")
     parser.add_argument(
         "-j", "--workers", default=16, type=int, metavar="N", help="number of data loading workers (default: 16)"
     )
@@ -606,6 +619,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
     parser.add_argument("--log_per_step", type=int, default=10, help="the number of steps between two logging")
+    parser.add_argument("--from-scratch", action="store_true")
     return parser
 
 

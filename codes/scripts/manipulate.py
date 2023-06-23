@@ -11,7 +11,7 @@ from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, Si
 from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
 from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU, SquaredReLU, SShaped, JumpingSquaredReLU
 from ..data.miniimagenet import MiniImagenet
-from torchvision.datasets import ImageNet
+from torchvision.datasets import ImageNet, ImageFolder
 
 
 
@@ -93,8 +93,8 @@ if args.dataset == 'cifar10':
     train_dataset = CIFAR10('/data/pz/sparsity/cifar10', True, transform=train_transforms, download=True)
     test_dataset = CIFAR10('/data/pz/sparsity/cifar10', False, transform=test_transforms, download=True)
 elif args.dataset == 'imagenet1k':
-    train_dataset = ImageNet('/data/pz/imagenet256', 'train', transform=train_transforms)
-    test_dataset = ImageNet('/data/pz/imagenet256', 'test', transform=train_transforms)
+    train_dataset = ImageFolder('data/imagenet1k256/ILSVRC/Data/CLS-LOC/train', transform=train_transforms)
+    test_dataset = ImageFolder('data/imagenet1k256/ILSVRC/Data/CLS-LOC/val', transform=test_transforms)
 
 # train_dataset = MiniImagenet('/data/datasets/miniimagenet', 'train', args.image_size)
 # test_dataset = MiniImagenet('/data/datasets/miniimagenet', 'test', args.image_size)
@@ -125,9 +125,9 @@ vit = Model(
     ),
     ERM(),
     observation,
-    GradientNoisePlugin(log_per_step=args.log_per_step),
+    # GradientNoisePlugin(log_per_step=args.log_per_step),
     SimilarityPlugin(log_per_step=args.log_per_step),
-    ParameterChangePlugin(log_per_step=args.log_per_step),
+    # ParameterChangePlugin(log_per_step=args.log_per_step),
     ActivationDistributionPlugin(12, log_per_step=args.log_per_step)
 ).to(device)
 
@@ -154,7 +154,7 @@ training = Training(
     scheduler_args={
         'lr_lambda': lambda epoch: args.initial_lr_ratio + min(epoch / len(train_dataloader) / args.warmup_epoch, 1) * (1 - args.initial_lr_ratio),
         'last_epoch': args.warmup_epoch,
-    } if not args.rezero else None,
+    } if not args.rezero and args.warmup_epoch is not None and args.warmup_epoch > 0 else None,
     log_per_step=args.log_per_step,
 )
 
