@@ -123,9 +123,6 @@ class EncoderBlock(nn.Module):
 
     def forward(self, input: torch.Tensor):
         torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-        if self.implicit_adversarial_samples is not None:
-            input = self.implicit_adversarial_samples(input)
-        
         if self.rezero:
             x = input
         else:
@@ -140,6 +137,8 @@ class EncoderBlock(nn.Module):
             y = self.ln_2(x)
 
 
+        if self.implicit_adversarial_samples is not None:
+            y = self.implicit_adversarial_samples(y)
         y = self.mlp(y)
         if self.rezero:
             z = x + self.alpha * y
