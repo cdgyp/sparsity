@@ -111,7 +111,7 @@ class SquaredReLU(CustomizedActivation):
 
 class JumpingSquaredReLU(CustomizedActivation):
     def forward(self, x):
-        return (x >= 0) * ((x + 1)**2 - 1) / 2
+        return (x > 0) * ((x + 1)**2 - 1) / 2
     
     def get_habitat(self):
         return {
