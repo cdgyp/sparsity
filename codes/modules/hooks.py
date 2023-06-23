@@ -247,7 +247,7 @@ class ActivationObservationPlugin(Plugin):
             for i, h in enumerate(self.activation_hooks):
                 assert h.handle is not None
                 self.losses.observe(h.pre_activations.mean(), 'pre_activation', i)
-                if self.pre_activation_only:
+                if not self.pre_activation_only:
                     a = h.activations
                     assert len(a.shape) > 1
                     great_than_zero = (a.abs() > 0).float()
