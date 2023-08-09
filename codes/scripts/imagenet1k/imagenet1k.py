@@ -14,6 +14,7 @@ from torch import nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 from ...base import LossManager, Model
+from ...scheduler.sine import SineAnnealingScheduler
 
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
@@ -232,50 +233,7 @@ def load_data(traindir, valdir, args):
     return dataset, dataset_test, train_sampler, test_sampler
 
 
-from torch.utils.data import DataLoader
-def get_model(model_type: str, dataloader: DataLoader, args=None):
-    from ...base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
-    from ...modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
-    from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, ImplicitAdversarialSample
-    from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU 
-    sparsified = (model_type == 'sparsified')
-
-    writer, _ = new_experiment('imagenet1k/' + args.title + '/' + f'{(model_type)}', None, dir_to_runs='runs')
-
-    if sparsified:
-        default_activation_layer = JumpingSquaredReLU
-    else:
-        default_activation_layer = CustomizedReLU
-    MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
-    model = Model(
-        Wrapper(
-            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, **{
-                'num_classes': 1000,
-                'rezero': False,
-                'implicit_adversarial_samples': sparsified
-            })
-        ),
-        ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
-        # GradientNoisePlugin(log_per_step=args.log_per_step),
-        SimilarityPlugin(log_per_step=args.log_per_step),
-        # ParameterChangePlugin(log_per_step=args.log_per_step),
-        ActivationDistributionPlugin(12, log_per_step=args.log_per_step)
-    ).to(args.device)
-
-    model.iteration = 0
-    model.epoch = 0
-    model.losses = LossManager(writer=writer)
-    start_tensorboard_server(writer.log_dir)
-    args.output_dir = os.path.join(writer.log_dir, 'save')
-
-    if sparsified:
-        # make parameters of dynamic modules of implicit adversarial samples ready
-        with torch.no_grad():
-            X, Y = next(iter(dataloader))
-            pred = model(X.to(args.device)[:args.physical_batch_size])
-
-    return model
-
+from .mymodel import get_model
 
 
 def main(args):
@@ -329,9 +287,12 @@ def main(args):
         dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True, drop_last=True
     )
 
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location="cpu")
+
     print("Creating model")
     if args.model in ['vanilla', 'sparsified']:
-        model = get_model(args.model, data_loader, args)
+        model = get_model(args.model, data_loader, args, start_epoch=checkpoint['epoch'] + 1 if args.resume else 0, epoch_size=len(data_loader))
     else:
         model = torchvision.models.get_model(args.model, weights=args.weights, num_classes=num_classes)
     model.to(device)
@@ -382,9 +343,18 @@ def main(args):
     args.lr_scheduler = args.lr_scheduler.lower()
     if args.lr_scheduler == "steplr":
         main_lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    elif args.lr_scheduler == 'sineannealinglr':
+        main_lr_scheduler = SineAnnealingScheduler(
+            optimizer,
+            T_max=args.epochs - args.lr_warmup_epochs,
+            last_epoch=args.start_epoch,
+            verbose=True
+        )
     elif args.lr_scheduler == "cosineannealinglr":
         main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs - args.lr_warmup_epochs, eta_min=args.lr_min, 
+            optimizer, 
+            T_max=args.epochs - args.lr_warmup_epochs, 
+            eta_min=args.lr_min, 
             last_epoch=args.start_epoch,
             verbose=True
         )
@@ -434,7 +404,6 @@ def main(args):
         model_ema = utils.ExponentialMovingAverage(model_without_ddp, device=device, decay=1.0 - alpha)
 
     if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"])
         if not args.test_only:
             optimizer.load_state_dict(checkpoint["optimizer"])
@@ -620,6 +589,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
     parser.add_argument("--log_per_step", type=int, default=10, help="the number of steps between two logging")
     parser.add_argument("--from-scratch", action="store_true")
+    parser.add_argument("--implicit-adversarial-samples-clipping", type=float, default=None, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
     return parser
 
 

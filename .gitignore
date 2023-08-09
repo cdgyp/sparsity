@@ -5,3 +5,4 @@ pic
 ./data/***
 !***/.gitkeep
 data/imagenet1k256
+dumps/***

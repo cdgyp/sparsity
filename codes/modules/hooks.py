@@ -40,7 +40,7 @@ class ActivationMapHook(ForwardHook):
         self.module = None
     def __call__(self, module: nn.Module, input, output):
         assert isinstance(output, torch.Tensor), output
-        self.activations = output
+        self.activations = output.to_dense()
         assert isinstance(input, tuple) and len(input) == 1
         self.pre_activations = input[0]
         self.module = ModuleReference(module)
@@ -55,7 +55,7 @@ class MlpGradientHook(BackwardHook):
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
         assert isinstance(grad_output, tuple) and len(grad_output) == 1
-        grad = grad_output[0]
+        grad = grad_output[0].to_dense()
         assert isinstance(grad, torch.Tensor), grad
         self.gradients = grad
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
@@ -450,7 +450,7 @@ class ParameterChangePlugin(Plugin):
             self.losses.observe((self.initial_parameters - new_parameters).abs().mean(), 'parameter_changes', 'mean_absolute')
             self.losses.observe((self.initial_parameters - new_parameters).abs() / (self.initial_parameters.abs() + 1e-32), 'parameter_changes', 'l1_relative')
 
-            if self.training and self.iteration % (35 * self.log_per_step) == 0:
+            if self.training and self.iteration % (100 * self.log_per_step) == 0:
                 self.losses.histogram(self.initial_parameters - new_parameters, 'parameter_changes', 'absolute', bins=200)
         
 class ActivationDistributionPlugin(Plugin):
@@ -474,7 +474,7 @@ class ActivationDistributionPlugin(Plugin):
     def do_logs(self):
         for i, h in enumerate(self.hooks):
             habitat = h.module.get_habitat()
-            if self.training and self.iteration % (self.log_per_step * 35) == 0:
+            if self.training and self.iteration % (self.log_per_step * 100) == 0:
                 self.losses.histogram(h.activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
                 self.losses.histogram(h.pre_activations.flatten().clamp(min=habitat['view_x'][0, 0].item(), max=habitat['view_x'][0, 1].item()), 'pre_activation_distribution', i, bins=200)
             
@@ -498,3 +498,87 @@ class ActivationDistributionPlugin(Plugin):
             h.pre_activations = None
         if self.training:
             self.activations = []
+
+class ActivationGradientHook(MlpGradientHook):
+    def hook_on_all(module: nn.Module, depth, *args, **kwargs):
+        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[ActivationPosition]))
+
+
+class DiagnoalityPlugin(Plugin):
+    def __init__(self, depth_main, log_per_step=10, eps=1e-5):
+        super().__init__()
+        self.log_per_step = log_per_step
+        self.eps = eps
+        self.depth = depth_main
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+        self.hooks = ActivationGradientHook.hook_on_all(main, self.depth)
+        print(len(self.hooks))
+    def after_backward(self, *args, **kwargs):
+        if self.iteration % self.log_per_step == 0 and self.training:
+            with torch.no_grad():
+                self.do_logs()
+
+    def entrysum(self, x: torch.Tensor, M: torch.Tensor=None):
+        """compute $sum_(i, j) (x x^T hadamard M)_(i, j) = trace(x x^T M) = trace(x^T M x)$
+            
+        :param torch.Tensor x: batched vectors
+        :param torch.Tensor M: symmetric, defaults to all-1 matrix
+        """
+        if M is None:
+            return x.sum(dim=-1) ** 2
+        else:
+            return einsum(
+            x, M, x,
+            '... i, i j, ... j  -> ...'
+        )
+    def diagonalsum(self, x: torch.Tensor, M: torch.Tensor=None):
+        if M is None:
+            return (x ** 2).sum(dim=-1)
+        else:
+            return ((x ** 2) * torch.diagonal(M)).sum(dim=-1)
+    
+    def single_log(self, name, p, i, sum_diagonals, sum_nondiagonals):
+        self.losses.observe(sum_diagonals.mean(), f'verification_norm{p}_{name}', 'diagonals', i)
+        self.losses.observe(sum_nondiagonals.mean(), f'verification_norm{p}_{name}', 'non-diagonals', i)
+        self.losses.observe(
+            ((sum_diagonals) / (sum_nondiagonals + self.eps)).log10().mean(),
+            f'verification_norm{p}_{name}', 'ratio', i
+        )
+
+
+    def do_logs(self):
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)][:-1]
+        assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
+        for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+            assert isinstance(mlp[0], torch.nn.Linear)
+            key = mlp[0].weight
+            kkT = einsum(
+                key, key,
+                'i d,   j d     ->  i j'
+            )
+            
+            identity = torch.eye(kkT.shape[-1], device=kkT.device)
+            for p in [1, 2]:
+                matrix = kkT.abs() ** p
+                sum_diagonals = torch.diagonal(matrix).sum()
+                sum_nondiagonals = matrix.sum() - sum_diagonals
+                self.single_log('kkT', p, i, sum_diagonals, sum_nondiagonals)
+
+            g = h.gradients
+            for p in [1, 2]:
+                for name, another_p in [('M', None), ('hadamard', kkT.abs() ** p)]:
+                    x = g.abs() ** p
+                    sum_diagonals = self.diagonalsum(x, another_p) # trace(abs(x x^T hadamard another) ** p) = trace((abs(x x^T) ** p hadamard abs(another) ** p)) = trace((abs(x**p) abs(x**p)^T) hadamard abs(another ** p))
+                    sum_all = self.entrysum(x, another_p) # sum abs((x x^T) hadamard another)**p_(i, j) = sum abs(abs(x x^T)**p hadamard abs(another) **p)_(i, j) = sum (abs(x)**p abs(x)**p^T hadamard abs(another)**p)_(i, j)
+                    sum_nondiagonals = sum_all - sum_diagonals
+                    assert sum_diagonals.shape == sum_nondiagonals.shape
+                    assert len(sum_diagonals.shape) in [1, 2], sum_diagonals.shape
+                    self.single_log(name, p, i, sum_diagonals, sum_nondiagonals)
+
+
+    def clean(self):
+        for h in self.hooks:
+            h.gradients = None
+
+

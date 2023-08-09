@@ -48,6 +48,7 @@ class MLPBlock(MLP):
 
     def __init__(self, in_dim: int, mlp_dim: int, dropout: float):
         super().__init__(in_dim, [mlp_dim, in_dim], activation_layer=MLPBlock.default_activation_layer, inplace=None, dropout=dropout)
+        self.dropout = dropout
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
@@ -85,6 +86,20 @@ class MLPBlock(MLP):
             unexpected_keys,
             error_msgs,
         )
+    # def forward(self, x: torch.Tensor):
+        # if self.dropout != 0:
+            # raise NotImplemented("sparse computation with dropout")
+        
+        # x_batching_shape = x.shape[:-1]
+        # x = x.flatten(start_dim=0, end_dim=-2)
+        # assert len(self) == 5, self
+        # x = self[0](x)
+        # x = self[1](x)
+        # x = x.float()
+        # with torch.autocast(device_type="cuda", enabled=False):
+            # z = self[3](x)
+
+        # return z.unflatten(0, x_batching_shape).half()
 
 
 class EncoderBlock(nn.Module):
