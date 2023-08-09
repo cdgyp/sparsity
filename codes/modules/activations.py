@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+
 class CustomizedActivation(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -109,9 +110,57 @@ class SquaredReLU(CustomizedActivation):
             "view_y": torch.tensor([[-5, 5]])
         }
 
+class _SparseJumpingSquaredReLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        x = x.float()
+        nonzeros = (x > 0).to_sparse_csr()
+        larger = (x > 4).to_sparse_csr()
+        middle = nonzeros * (~larger.to_dense())
+
+
+        middle_x = torch.masked.masked_tensor(x * middle, middle, requires_grad=True)
+        large_x = torch.masked.masked_tensor(x * larger, larger, requires_grad=True)
+
+        ctx.save_for_backward(middle_x)
+        ctx.save_for_backward(larger)
+        
+        middle_z = ((middle_x + 1) ** 2 - 1) / 2
+        if larger.sum() > 0:
+            large_z = (large_x - 4 * larger)
+            large_z = large_z * 5 + 12
+            return middle_z.get_data() + large_z.get_data()
+        else:
+            return middle_z.get_data()
+    @staticmethod
+    def backward(ctx, grad_output):
+        middle_x, larger = ctx.saved_tensors
+        derivative = (middle_x + 1).get_data() + larger * 5
+        return grad_output * derivative
+
+class _JumpingSquaredReLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        nonzeros = (x > 0)
+        larger = (x > 4)
+        ctx.save_for_backward(x)
+        return nonzeros * ((~larger.to_dense()) * ((x + 1)**2 - 1) / 2 +  larger * (5 * (x - 4) + 12))
+    @staticmethod
+    def backward(ctx, grad_output):
+        x,  = ctx.saved_tensors
+        nonzeros = x > 0
+        large = x > 4
+        middle = nonzeros * ~large
+
+        return grad_output * (middle * (x + 1) + large * 5)
+
 class JumpingSquaredReLU(CustomizedActivation):
+    def __init__(self):
+        super().__init__()
+        self.inner = _JumpingSquaredReLU.apply
+
     def forward(self, x):
-        return (x > 0) * ((x + 1)**2 - 1) / 2
+        return self.inner(x)
     
     def get_habitat(self):
         return {
