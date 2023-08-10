@@ -558,7 +558,6 @@ class DiagnoalityPlugin(Plugin):
                 'i d,   j d     ->  i j'
             )
             
-            identity = torch.eye(kkT.shape[-1], device=kkT.device)
             for p in [1, 2]:
                 matrix = kkT.abs() ** p
                 sum_diagonals = torch.diagonal(matrix).sum()

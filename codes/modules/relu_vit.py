@@ -14,7 +14,7 @@ from torchvision.models._api import register_model, Weights, WeightsEnum
 from torchvision.models._meta import _IMAGENET_CATEGORIES
 from torchvision.models._utils import _ovewrite_named_param, handle_legacy_interface
 
-from .robustness import ImplicitAdversarialSample
+from .robustness import WrappedImplicitAdversarialSample
 
 
 __all__ = [
@@ -125,7 +125,7 @@ class EncoderBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         if implicit_adversarial_samples:
-            self.implicit_adversarial_samples = ImplicitAdversarialSample()
+            self.implicit_adversarial_samples = WrappedImplicitAdversarialSample()
         else:
             self.implicit_adversarial_samples = None
 
