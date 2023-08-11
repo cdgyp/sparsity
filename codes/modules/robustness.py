@@ -19,15 +19,15 @@ class ImplicitAdversarialSample(nn.Module):
             with torch.no_grad():
                 self.biases.clamp_(min=-self.clipping, max=self.clipping)
 
-class WrappedImplicitAdversarialSample(BaseModule):
+class WrappedImplicitAdversarialSample(BaseModule, ImplicitAdversarialSample):
     def __init__(self, clipping=None, shape=None) -> None:
-        super().__init__()
-        self.inner = ImplicitAdversarialSample(clipping=clipping, shape=shape)
+        BaseModule.__init__(self)
+        ImplicitAdversarialSample.__init__(self, clipping=clipping, shape=shape)
+        #self.inner = ImplicitAdversarialSample(clipping=clipping, shape=shape)
     def forward(self, x: torch.Tensor):
-        self.losses.observe(self.inner.biases.abs().mean(), 'implicit_adversarial_samples')
-        return self.inner(x)
-    def clip(self):
-        self.inner.clip()
+        res = ImplicitAdversarialSample.forward(self, x)
+        self.losses.observe(self.biases.abs().mean(), 'implicit_adversarial_samples')
+        return res
 
 class ImplicitAdversarialSamplePlugin(Plugin):
     def __init__(self, clipping=None) -> None:

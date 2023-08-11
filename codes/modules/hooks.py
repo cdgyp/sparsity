@@ -40,7 +40,7 @@ class ActivationMapHook(ForwardHook):
         self.module = None
     def __call__(self, module: nn.Module, input, output):
         assert isinstance(output, torch.Tensor), output
-        self.activations = output.to_dense()
+        self.activations = output.to_dense().float()
         assert isinstance(input, tuple) and len(input) == 1
         self.pre_activations = input[0]
         self.module = ModuleReference(module)
@@ -55,7 +55,7 @@ class MlpGradientHook(BackwardHook):
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
         assert isinstance(grad_output, tuple) and len(grad_output) == 1
-        grad = grad_output[0].to_dense()
+        grad = grad_output[0].to_dense().float()
         assert isinstance(grad, torch.Tensor), grad
         self.gradients = grad
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
