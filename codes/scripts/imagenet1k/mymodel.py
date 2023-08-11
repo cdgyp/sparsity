@@ -23,7 +23,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
     MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
     model = Model(
         Wrapper(
-            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, **{
+            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
                 'num_classes': 1000,
                 'rezero': False,
                 'implicit_adversarial_samples': sparsified
@@ -50,4 +50,4 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
             X, Y = next(iter(dataloader))
             pred = model(X.to(args.device)[:args.physical_batch_size])
 
-    return model
+    return model.to(args.device)

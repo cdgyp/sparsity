@@ -650,7 +650,7 @@ class ViT_H_14_Weights(WeightsEnum):
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ViT_B_16_Weights.IMAGENET1K_V1))
-def relu_vit_b_16(*, weights: Optional[ViT_B_16_Weights] = None, progress: bool = True, **kwargs: Any) -> VisionTransformer:
+def relu_vit_b_16(*, weights: Optional[ViT_B_16_Weights] = None, progress: bool = True, wide=False, **kwargs: Any) -> VisionTransformer:
     """
     Constructs a vit_b_16 architecture from
     `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale <https://arxiv.org/abs/2010.11929>`_.
@@ -672,10 +672,10 @@ def relu_vit_b_16(*, weights: Optional[ViT_B_16_Weights] = None, progress: bool 
 
     return _vision_transformer(
         patch_size=16,
-        num_layers=12,
-        num_heads=12,
-        hidden_dim=768,
-        mlp_dim=3072,
+        num_layers=12 if not wide else 24,
+        num_heads=12 if not wide else 24,
+        hidden_dim=768 if not wide else 1536,
+        mlp_dim=3072 if not wide else 768,
         weights=weights,
         progress=progress,
         **kwargs,
