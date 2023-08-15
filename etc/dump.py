@@ -10,8 +10,16 @@ def get_subtag(acc: EventAccumulator):
     except:
         return str(str_tag)
 
-def tabulate_events(dpath):
-    summary_iterators = [EventAccumulator(os.path.join(dpath, dname)).Reload() for dname in os.listdir(dpath) if os.path.isdir(os.path.join(dpath, dname))]
+def tabulate_events(dpath, filter=None):
+    def _filter(dname):
+        if filter is None or len(filter) == 0:
+            return True
+        try:
+            return dname in filter
+        except:
+            return filter(dname)
+
+    summary_iterators = [EventAccumulator(os.path.join(dpath, dname)).Reload() for dname in os.listdir(dpath) if os.path.isdir(os.path.join(dpath, dname)) and _filter(dname)]
     summary_iterators = sorted(summary_iterators, key=lambda acc: get_subtag(acc))
 
     tags = summary_iterators[0].Tags()['scalars']
@@ -37,9 +45,11 @@ def tabulate_events(dpath):
 parser = ArgumentParser()
 parser.add_argument('--source-dir', type=str, required=True)
 parser.add_argument('--output-dir', type=str, required=True)
+parser.add_argument('--filter-dname', type=str, nargs='+')
+
 args = parser.parse_args()
 
-steps = tabulate_events(args.source_dir)
+steps = tabulate_events(args.source_dir, filter=args.filter_dname)
 
 # Save each tag to a separate CSV
 os.makedirs(args.output_dir, exist_ok=True)

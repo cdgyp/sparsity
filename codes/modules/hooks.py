@@ -504,7 +504,7 @@ class ActivationGradientHook(MlpGradientHook):
         return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[ActivationPosition]))
 
 
-class DiagnoalityPlugin(Plugin):
+class MkkTPlugin(Plugin):
     def __init__(self, depth_main, log_per_step=10, eps=1e-5):
         super().__init__()
         self.log_per_step = log_per_step
@@ -514,10 +514,6 @@ class DiagnoalityPlugin(Plugin):
         self.main = ModuleReference(main)
         self.hooks = ActivationGradientHook.hook_on_all(main, self.depth)
         print(len(self.hooks))
-    def after_backward(self, *args, **kwargs):
-        if self.iteration % self.log_per_step == 0 and self.training:
-            with torch.no_grad():
-                self.do_logs()
 
     def entrysum(self, x: torch.Tensor, M: torch.Tensor=None):
         """compute $sum_(i, j) (x x^T hadamard M)_(i, j) = trace(x x^T M) = trace(x^T M x)$
@@ -537,7 +533,12 @@ class DiagnoalityPlugin(Plugin):
             return (x ** 2).sum(dim=-1)
         else:
             return ((x ** 2) * torch.diagonal(M)).sum(dim=-1)
-    
+        
+class DiagonalityPlugin(MkkTPlugin):
+    def after_backward(self, *args, **kwargs):
+        if self.iteration % self.log_per_step == 0 and self.training:
+            with torch.no_grad():
+                self.do_logs()
     def single_log(self, name, p, i, sum_diagonals, sum_nondiagonals):
         self.losses.observe(sum_diagonals.mean(), f'verification_norm{p}_{name}', 'diagonals', i)
         self.losses.observe(sum_nondiagonals.mean(), f'verification_norm{p}_{name}', 'non-diagonals', i)
@@ -580,4 +581,60 @@ class DiagnoalityPlugin(Plugin):
         for h in self.hooks:
             h.gradients = None
 
+from typing import Union
+class SpectralObservationPlugin(MkkTPlugin):
+    def eigenvalues(X) -> torch.Tensor:
+        """eigenvalues of X
+        """
+        return torch.real(torch.linalg.eigvals(X))
+    
+    def spectral_properties(g, K, ratio_threshold=0.1, eps=1e-32) -> 'dict[str, Union[torch.Tensor, dict[str, torch.Tensor]]]':
+        kkT = einsum(
+            K.float(), K.float(),
+            '... i d, ... j d -> ... i j'
+        )
+        trace = (kkT * torch.eye(kkT.shape[-1], device=kkT.device).unsqueeze(dim=0)).sum(dim=(-1, -2))
+        eigenvalues_kkT = SpectralObservationPlugin.eigenvalues(kkT).clamp(min=0)
+        threshold: torch.Tensor = eigenvalues_kkT.mean(dim=-1) * ratio_threshold
+        non_zero = eigenvalues_kkT > threshold.unsqueeze(dim=-1)
+        filtered_eigenvalues_kkT: torch.Tensor = eigenvalues_kkT * non_zero
+        max_eigenvalues_kkT = filtered_eigenvalues_kkT.max(dim=-1)[0]
+        min_nonzero_eigenvalues_kkT = (filtered_eigenvalues_kkT + max_eigenvalues_kkT.unsqueeze(dim=-1) * (~non_zero)).min(dim=-1)[0]
+    
+        min_eigenvalues_kkT = eigenvalues_kkT.min(dim=-1)[0]
+        l, r = (min_eigenvalues_kkT+1e-3).log10(), (max_eigenvalues_kkT/3).log10()
+        bins = [
+            10**((r - l) / 10 * i + l) for i in range(11)
+        ]
+        bins =  bins + [max_eigenvalues_kkT]
+        h = torch.histogram(eigenvalues_kkT.to('cpu'), torch.tensor(bins))
+        h_near_zero = torch.histogram(eigenvalues_kkT.to('cpu'), torch.tensor([1e-9, 1e-6, 1e-3]))
+
+        g2 = g**2
+        min_g2, max_g2 = g2.min(dim=-1)[0], g2.max(dim=-1)[0]
+        return {
+            'kkT': {
+                'average_eigenvalues': (eigenvalues_kkT.mean(dim=-1), trace / kkT.shape[-1]),
+                'zero_rate': (~non_zero).float().mean(dim=-1),
+                'max_pseudo_zeros': (eigenvalues_kkT * (~non_zero)).max(dim=-1)[0],
+                'average_nonzero_eigenvalues': (eigenvalues_kkT * non_zero).sum(dim=-1) / non_zero.sum(dim=-1),
+                'ratio': max_eigenvalues_kkT / (min_nonzero_eigenvalues_kkT + eps),
+                'max_eigenvalue':  max_eigenvalues_kkT,
+                'min_nonzero_eigenvalue': min_nonzero_eigenvalues_kkT,
+                'normal_histogram': {
+                    'probabilities': h[0] / h[0].sum(dim=-1),
+                    'bin_edges': h[1]
+                },
+                'near_zero_histogram': {
+                    'probabilities': h_near_zero[0] / h_near_zero[0].sum(dim=-1),
+                    'bin_edges': h_near_zero[1]
+                },
+                'eigenvalues': eigenvalues_kkT,
+            },
+            'g': {
+                'min': min_g2,
+                'max': max_g2,
+            },
+            'combined': max_eigenvalues_kkT * max_g2 / (min_nonzero_eigenvalues_kkT * min_g2 + eps) 
+        }
 

@@ -26,3 +26,29 @@ python etc/dump.py --source-dir runs/manipulate_width_implicit_relu2/vit_\(activ
 
 done
 done
+
+
+for full in finetune/vanilla/20230810-224053 from_scratch4/sparsified/20230809-160718; do
+for matrix_type in kkT M hadamard;do
+
+type=$(echo $full | sed -E "s/.*(vanilla|sparsified).*/\1/g")
+folder=finetuning
+if [ $type == sparsified ]; then
+    folder=imagenet1k
+fi
+
+python etc/dump.py --source-dir "runs/imagenet1k/$full/verification_norm1_${matrix_type}_[obs]diagonals/" --output-dir dumps/$folder/$type/spectral/
+
+done
+done
+
+for norm in 1 2; do
+for matrix_type in kkT M hadamard;do
+
+python etc/dump.py --source-dir "runs/imagenet1k/from_scratch4/sparsified/20230809-160718/verification_norm${norm}_${matrix_type}_[obs]ratio/" --output-dir dumps/imagenet1k/sparsified/diagonal/
+
+done
+done
+
+
+python etc/dump.py --source-dir "runs/imagenet1k/from_scratch4/sparsified/20230809-160718/activation_concentration_(train)_[obs]activation/" --output-dir dumps/imagenet1k/sparsified/from_scratch4/ --filter-dname '4' '7' '8' '10'
