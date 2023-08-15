@@ -406,8 +406,8 @@ def main(args):
     if args.resume:
         model_without_ddp.load_state_dict(checkpoint["model"])
         if not args.test_only:
-           #  optimizer.load_state_dict(checkpoint["optimizer"])
-            #lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             pass 
         args.start_epoch = checkpoint["epoch"] + 1
         if model_ema:
@@ -591,7 +591,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--log_per_step", type=int, default=10, help="the number of steps between two logging")
     parser.add_argument("--from-scratch", action="store_true")
     parser.add_argument("--implicit-adversarial-samples-clipping", type=float, default=None, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
-    parser.add_arugment("--wide", action="store_true", help="turn on wide MLP for transformers")
+    parser.add_argument("--wide", action="store_true", help="turn on wide MLP for transformers")
     return parser
 
 

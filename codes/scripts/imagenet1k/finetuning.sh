@@ -5,7 +5,7 @@ export https_proxy=
 for model in ${MODELS[@]};
 do
     python -m codes.scripts.imagenet1k.imagenet1k   \
-        --model $model --start-epoch 0 --epochs 10 --batch-size 512 --physical-batch-size 16 --opt adamw --lr 0.003 --wd 0.3 \
+        --model $model --start-epoch 0 --epochs 10 --batch-size 512 --physical-batch-size 64 --opt adamw --lr 0.003 --wd 0.3 \
         --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \
         --lr-scheduler sineannealinglr  \
         --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
