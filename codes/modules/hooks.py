@@ -533,6 +533,9 @@ class MkkTPlugin(Plugin):
             return (x ** 2).sum(dim=-1)
         else:
             return ((x ** 2) * torch.diagonal(M)).sum(dim=-1)
+    def clean(self):
+        for h in self.hooks:
+            h.gradients = None
         
 class DiagonalityPlugin(MkkTPlugin):
     def after_backward(self, *args, **kwargs):
@@ -575,11 +578,6 @@ class DiagonalityPlugin(MkkTPlugin):
                     assert sum_diagonals.shape == sum_nondiagonals.shape
                     assert len(sum_diagonals.shape) in [1, 2], sum_diagonals.shape
                     self.single_log(name, p, i, sum_diagonals, sum_nondiagonals)
-
-
-    def clean(self):
-        for h in self.hooks:
-            h.gradients = None
 
 from typing import Union
 class SpectralObservationPlugin(MkkTPlugin):
@@ -637,4 +635,40 @@ class SpectralObservationPlugin(MkkTPlugin):
             },
             'combined': max_eigenvalues_kkT * max_g2 / (min_nonzero_eigenvalues_kkT * min_g2 + eps) 
         }
+    def do_logs(self):
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)][:-1]
+        assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
+        for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+            assert isinstance(mlp[0], torch.nn.Linear)
+            g = h.gradients
 
+            g2: torch.Tensor = g**2
+            min_g2, max_g2 = g2.min(dim=-1)[0], g2.max(dim=-1)[0]
+            mean_g2 = g2.mean(dim=-1)
+
+            self.losses.observe(min_g2.mean(), 'spectral_g2', 'min', i)
+            self.losses.observe(max_g2.mean(), 'spectral_g2', 'max', i)
+            self.losses.observe(g2.mean(), 'spectral_g2', 'mean', i)
+
+            self.losses.observe((max_g2 / (min_g2 + self.eps)).log10().mean(), 'spectral_g2', 'log_ratio', i)
+            self.losses.observe((max_g2 / (min_g2 + self.eps)).mean(), 'spectral_g2', 'ratio', i)
+
+            self.losses.observe((mean_g2 / (min_g2 + self.eps)).log10().mean(), 'spectral_g2', 'log_ratio_with_mean', i)
+            self.losses.observe((mean_g2 / (min_g2 + self.eps)).mean(), 'spectral_g2', 'ratio_with_mean', i)
+
+            if int(self.iteration // self.log_per_step) % 10 == 0:
+                sorted_g2 = g2.sort(dim=-1)[0]
+                for p in [0.1, 0.2, 0.3]:
+                    lowerbound = sorted_g2[..., int(p/2*sorted_g2.shape[-2])]
+                    upperbound = sorted_g2[..., -int(p/2*sorted_g2.shape[-2])]
+                    self.losses.observe(lowerbound.mean(), 'spectral_g2_bounds', 'lower', 1 - p, i)
+                    self.losses.observe(upperbound.mean(), 'spectral_g2_bounds', 'upper', 1 - p, i)
+
+                    ratio = upperbound / (lowerbound + self.eps)
+                    self.losses.observe(ratio.mean(), 'spectral_g2_bounds', 'ratio', 1 - p, i)
+                    self.losses.observe(ratio.log10().mean(), 'spectral_g2_bounds', 'log_ratio', 1 - p, i)
+
+    def after_backward(self, *args, **kwargs):
+        if self.iteration % self.log_per_step == 0 and self.training:
+            with torch.no_grad():
+                self.do_logs()
