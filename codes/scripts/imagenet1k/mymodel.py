@@ -3,7 +3,7 @@ import os
 from torch.utils.data import DataLoader
 def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1):
     from ...base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
-    from ...modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin
+    from ...modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity
     from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
     from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
     from ...modules.robustness import ImplicitAdversarialSamplePlugin
@@ -36,7 +36,8 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
         ActivationDistributionPlugin(12, log_per_step=args.log_per_step),
         ImplicitAdversarialSamplePlugin(args.implicit_adversarial_samples_clipping),
         DiagonalityPlugin(12, log_per_step=args.log_per_step),
-        SpectralObservationPlugin(12, log_per_step=args.log_per_step)
+        # SpectralObservationPlugin(12, log_per_step=args.log_per_step)
+        EffectiveGradientSparsity(12, log_per_step=args.log_per_step),
     ).to(args.device)
 
     model.iteration = epoch_size * start_epoch

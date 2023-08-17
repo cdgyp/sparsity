@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from codes.base import Plugin
 from codes.base.base import BaseModule, Plugin, ModuleReference
 from einops import einsum
 
@@ -536,12 +537,12 @@ class MkkTPlugin(Plugin):
     def clean(self):
         for h in self.hooks:
             h.gradients = None
-        
-class DiagonalityPlugin(MkkTPlugin):
     def after_backward(self, *args, **kwargs):
         if self.iteration % self.log_per_step == 0 and self.training:
             with torch.no_grad():
                 self.do_logs()
+        
+class DiagonalityPlugin(MkkTPlugin):
     def single_log(self, name, p, i, sum_diagonals, sum_nondiagonals):
         self.losses.observe(sum_diagonals.mean(), f'verification_norm{p}_{name}', 'diagonals', i)
         self.losses.observe(sum_nondiagonals.mean(), f'verification_norm{p}_{name}', 'non-diagonals', i)
@@ -668,7 +669,34 @@ class SpectralObservationPlugin(MkkTPlugin):
                     self.losses.observe(ratio.mean(), 'spectral_g2_bounds', 'ratio', 1 - p, i)
                     self.losses.observe(ratio.log10().mean(), 'spectral_g2_bounds', 'log_ratio', 1 - p, i)
 
-    def after_backward(self, *args, **kwargs):
-        if self.iteration % self.log_per_step == 0 and self.training:
-            with torch.no_grad():
-                self.do_logs()
+from torch.autograd.functional import jacobian
+class EffectiveGradientSparsity(MkkTPlugin):
+
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        super().register(main, plugins)
+        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
+    def do_logs(self):
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)][:-1]
+        assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
+        for i, (hook_g, hook_a) in enumerate(zip(self.hooks, self.activation_hooks)):
+            g = hook_g.gradients
+            pre_activations = hook_a.pre_activations
+            assert g.shape == pre_activations.shape, (g.shape, pre_activations.shape)
+            activation_function = hook_a.module.main
+            def wrapped(x):
+                return activation_function(x).sum()
+            with torch.set_grad_enabled(True):
+                gamma = jacobian(wrapped, pre_activations)
+            assert g.shape == gamma.shape, (g.shape, gamma.shape)
+            for p in [1e-9, 1e-6, 1e-3]:
+                self.losses.observe((g.abs() < (p * 1e9)).float().mean(), 'concentration_g', p, i)
+                self.losses.observe(((g * gamma).abs() < p).float().mean(), 'effective_concentration', p, i)
+            for p in [1, 2]:
+                self.losses.observe(((g * gamma).abs()**p).sum(dim=-1).mean(), 'effective_sparsity_norm', p, i)
+            
+
+
+
+
+        
+
