@@ -43,7 +43,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
     model.iteration = epoch_size * start_epoch
     model.epoch = start_epoch
     model.losses = LossManager(writer=writer)
-    start_tensorboard_server(writer.log_dir)
+    # start_tensorboard_server(writer.log_dir)
     args.output_dir = os.path.join(writer.log_dir, 'save')
 
     if sparsified:
