@@ -9,8 +9,9 @@ do
         --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \
         --lr-scheduler sineannealinglr  \
         --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
-        --clip-grad-norm 10 --ra-sampler --cutmix-alpha 1.0 \
+        --clip-grad-norm 1 --ra-sampler --cutmix-alpha 1.0 \
         --amp \
         --device $DEVICE  --log_per_step 20 --physical-epochs 15 \
+        --dont-resume-lr-schedulers \
         "$@"
 done

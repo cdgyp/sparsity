@@ -81,6 +81,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
             model.losses.observe(loss, 'loss')
             model.losses.observe(acc1 / 100, 'acc', 1)
             model.losses.observe(acc5 / 100, 'acc', 5)
+            model.losses.observe(optimizer.param_groups[0]["lr"], 'lr')
             if model.iteration % args.log_per_step == 0:
                 model.losses.log_losses(model.iteration)
             model.iteration += 1
@@ -407,7 +408,9 @@ def main(args):
         model_without_ddp.load_state_dict(checkpoint["model"])
         if not args.test_only:
             optimizer.load_state_dict(checkpoint["optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            if not args.dont_resume_lr_schedulers:
+                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            lr_scheduler.step(lr_scheduler.last_epoch)
             pass 
         args.start_epoch = checkpoint["epoch"] + 1
         if model_ema:
@@ -592,6 +595,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--from-scratch", action="store_true")
     parser.add_argument("--implicit-adversarial-samples-clipping", type=float, default=None, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
     parser.add_argument("--wide", action="store_true", help="turn on wide MLP for transformers")
+    parser.add_argument("--dont-resume-lr-schedulers", action="store_true")
     return parser
 
 
