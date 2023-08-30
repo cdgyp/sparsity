@@ -55,12 +55,16 @@ class MlpGradientHook(BackwardHook):
         self.gradients: torch.Tensor = None
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
-        assert isinstance(grad_output, tuple) and len(grad_output) == 1
-        grad = grad_output[0].to_dense().float()
+        assert (isinstance(grad_output, tuple) and len(grad_output) == 1) or isinstance(grad_output, torch.Tensor), grad_output
+        grad = grad_output[0].to_dense().float() if isinstance(grad_output, tuple) else grad_output.to_dense().float()
         assert isinstance(grad, torch.Tensor), grad
         self.gradients = grad
     def hook_on_all(module: nn.Module, depth, *args, **kwargs):
         return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward, MLPBlock]))
+    def get(self):
+        res = self.gradients
+        self.gradients = None
+        return res
     
 class GradientRecorder(BaseModule):
     def __init__(self, p=1, beta=0.9, label=''):
