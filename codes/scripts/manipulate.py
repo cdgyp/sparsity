@@ -7,9 +7,10 @@ from torch  import nn
 from torchvision import transforms
 
 from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDataset, ERM, DeviceSetter, start_tensorboard_server, replace_config, SpecialReplacement
-from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin
+from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, EffectiveGradientSparsity
 from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
 from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU, SquaredReLU, SShaped, JumpingSquaredReLU
+from ..modules.robustness import ImplicitAdversarialSamplePlugin
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet, ImageFolder
 
@@ -42,13 +43,14 @@ parser.add_argument('--careful_bias_initialization', type=int, default=0)
 parser.add_argument('--rezero', type=int, default=0)
 parser.add_argument('--implicit_adversarial_samples', type=int, default=0)
 parser.add_argument('--dataset', type=str, default='cifar10')
+parser.add_argument('--mixed_precision', action='store_true')
 
 all_args = parser.parse_known_args()
 args = all_args[0]
 
 
 print('not known params', all_args[1])
-writer, ref_hash = new_experiment(args.title + '_' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
+writer, ref_hash = new_experiment(args.title + '/' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
 
 if args.activation_layer == 'relu':
     default_activation_layer = CustomizedReLU
@@ -124,11 +126,11 @@ vit = Model(
         })
     ),
     ERM(),
-    observation,
-    # GradientNoisePlugin(log_per_step=args.log_per_step),
-    SimilarityPlugin(log_per_step=args.log_per_step),
-    # ParameterChangePlugin(log_per_step=args.log_per_step),
-    ActivationDistributionPlugin(12, log_per_step=args.log_per_step)
+    ActivationDistributionPlugin(12, log_per_step=args.log_per_step),
+    ImplicitAdversarialSamplePlugin(1.0),
+    DiagonalityPlugin(12, log_per_step=args.log_per_step),
+    # SpectralObservationPlugin(12, log_per_step=args.log_per_step)
+    EffectiveGradientSparsity(12, log_per_step=args.log_per_step),
 ).to(device)
 
 if args.careful_bias_initialization:
@@ -156,6 +158,7 @@ training = Training(
         'last_epoch': args.warmup_epoch,
     } if not args.rezero and args.warmup_epoch is not None and args.warmup_epoch > 0 else None,
     log_per_step=args.log_per_step,
+    mixed_precision=args.mixed_precision
 )
 
 start_tensorboard_server(writer.log_dir)

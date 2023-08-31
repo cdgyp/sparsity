@@ -26,9 +26,9 @@ for optimizer in Adam
 do
 for lr in 1e-4
 do
-for improvements in '--activation_layer jumping_squared_relu --implicit_adversarial_samples 1' '--activation_layer jumping_squared_relu' '--activation_layer relu' '--activation_layer relu --implicit_adversarial_samples 1' 
+for improvements in '--activation_layer jumping_squared_relu' '--activation_layer relu'  '--activation_layer jumping_squared_relu --implicit_adversarial_samples 1' '--activation_layer relu --implicit_adversarial_samples 1' # 
 do
-args="--title $title --device $DEVICE --lr $lr --optimizer $optimizer --num_classes $num_classes --n_epoch $n_epoch --weight_decay $weight_decay --dropout $dropout --batch_size $batch_size --grad_clipping $grad_clip --p $p --batchwise_reported $batchwise_reported  --pretrained $pretrained --half_interval $half_interval --shift_x $shift_x --shift_y $shift_y --rezero $rezero --careful_bias_initialization $careful_bias_initialization  --alpha_x $alpha_x --alpha_y $alpha_y $improvements"
+args="--title $title --device $DEVICE --lr $lr --optimizer $optimizer --num_classes $num_classes --n_epoch $n_epoch --weight_decay $weight_decay --dropout $dropout --batch_size $batch_size --grad_clipping $grad_clip --p $p --batchwise_reported $batchwise_reported  --pretrained $pretrained --half_interval $half_interval --shift_x $shift_x --shift_y $shift_y --rezero $rezero --careful_bias_initialization $careful_bias_initialization  --alpha_x $alpha_x --alpha_y $alpha_y $improvements --mixed_precision $@"
 echo begin $args
 python -m codes.scripts.manipulate $args
 echo end $args

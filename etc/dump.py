@@ -27,7 +27,7 @@ def tabulate_events(dpath, filter=None):
     print('scalars:', len(summary_iterators))
 
     for it in summary_iterators:
-        assert it.Tags()['scalars'] == tags
+        assert it.Tags()['scalars'] == tags, (it.Tags()['scalars'], tags)
 
     out = {}
 

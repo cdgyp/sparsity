@@ -349,6 +349,7 @@ def main(args):
             optimizer,
             T_max=args.epochs - args.lr_warmup_epochs,
             last_epoch=args.start_epoch - 1,
+            warmup_phase=args.warmup_phase,
             verbose=True
         )
     elif args.lr_scheduler == "cosineannealinglr":
@@ -596,6 +597,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--implicit-adversarial-samples-clipping", type=float, default=None, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
     parser.add_argument("--wide", action="store_true", help="turn on wide MLP for transformers")
     parser.add_argument("--dont-resume-lr-schedulers", action="store_true")
+    parser.add_argument("--warmup_phase", type=float, default=1.0, help="length relative to 2 Pi, indicating how many epochs are under warmup")
     return parser
 
 

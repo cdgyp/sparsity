@@ -1,4 +1,4 @@
-from typing import Union
+import math
 import torch
 from torch import Tensor, nn
 from torch.nn.modules.module import Module
@@ -71,7 +71,7 @@ class MnistMLP(BaseModule):
         return self.classifier(z)
     
 class CovariancePlugin(Plugin):
-    def __init__(self, controller_identifier, label=None, clipped=True, activated_on_training=False, log_per_step=1, centered=False):
+    def __init__(self, controller_identifier, label=None, clipped=True, activated_on_training=False, log_per_step=1, centered=False, args=None):
         super().__init__()
         self.centered = centered
         self.covariances = None
@@ -85,11 +85,13 @@ class CovariancePlugin(Plugin):
         self.controller_identifier = controller_identifier
         self.activated_on_training = activated_on_training
         self.log_per_step = log_per_step
+        self.decay = 1 - args.weight_decay
+        self.effective_T = args.effective_T
+        self.hidden_dim = args.dim_hidden
+        self.batch_size = args.batch_size
+        
 
     def suitable(self):
-        if self.activated_on_training and self.iteration is not None:
-            if self.iteration % self.log_per_step != 0:
-                return False
         return self.controller_identifier is None or self.current_executer_id == self.controller_identifier
 
     def hook_type(self):
@@ -137,8 +139,8 @@ class CovariancePlugin(Plugin):
                 means_layerwise.append(mean) # [layer, i]
             
             self.covariances.append(
-                torch.stack(covariances_layerwise) # [batch, layer, i, j]
-            )   # []
+                torch.stack(covariances_layerwise) # [layer, i, j]
+            )   # [batch, layer, i, j]
             self.means.append(
                 torch.stack(means_layerwise)    # [batch, layer, i]
             )  
@@ -198,38 +200,45 @@ class CovariancePlugin(Plugin):
             means_layerwise = means.mean(dim=1)             # [layer, i]
             anisotropies = self.anisotropy(covariances_layerwise, self.label + '_epoch', means_layerwise)
 
-            self.covariances_of_epochs = self.covariances_of_epochs + covariances_layerwise  # [layer, i, j]
-            self.means_of_epochs = self.means_of_epochs + means_layerwise
-            self.n_epochs += 1
-            covariances_epochs_layerwise = self.covariances_of_epochs / self.n_epochs   # [layer, i, j]
-            means_epochs_layerwise = self.means_of_epochs / self.n_epochs                         # [layer, i]  
+            self.covariances_of_epochs = self.covariances_of_epochs * self.decay + covariances_layerwise  # [layer, i, j]
+            if self.centered:
+                if self.decay != 1:
+                    raise NotImplemented("centered under weight decay")
+                self.means_of_epochs = self.means_of_epochs + means_layerwise
+                means_epochs_layerwise = self.means_of_epochs / self.n_epochs                         # [layer, i]  
+            else:
+                means_epochs_layerwise = None
+            covariances_epochs_layerwise = self.covariances_of_epochs   # [layer, i, j]
             global_anisotropies = self.anisotropy(covariances_epochs_layerwise, self.label + '_global', means_epochs_layerwise)
+            inv_c = self.batch_size * min(self.iteration, self.effective_T) / self.hidden_dim
 
-            self.losses.observe(covariances.shape[-1], self.label + '_epoch_anisotropy', 'd')
-            self.losses.observe(covariances_epochs_layerwise.shape[-1], self.label + '_global_anisotropy', 'd')
-            for l, (anisotropy, global_anisotropy) in enumerate(zip(anisotropies, global_anisotropies)):
-                self.losses.observe(anisotropy, self.label + '_epoch_anisotropy', l)
-                self.losses.observe(global_anisotropy, self.label + '_global_anisotropy', l)
 
-                # E[x^T x] = E[trace(x^T x)] = trace(E[x x^T]) = trace(covariance)
-                self.losses.observe(torch.trace(covariances_layerwise[l]), self.label + '_epoch_norm', l) 
-                self.losses.observe(torch.trace(covariances_epochs_layerwise[l]), self.label + '_global_norm', l)
+            if self.iteration % self.log_per_step == 0:
+                self.losses.observe(inv_c, 'inv_c')
+                self.losses.observe(covariances.shape[-1], self.label + '_epoch_anisotropy', 'd')
+                self.losses.observe(covariances_epochs_layerwise.shape[-1], self.label + '_global_anisotropy', 'd')
+                for l, (anisotropy, global_anisotropy) in enumerate(zip(anisotropies, global_anisotropies)):
+                    self.losses.observe(anisotropy, self.label + '_epoch_anisotropy', l)
+                    self.losses.observe(global_anisotropy, self.label + '_global_anisotropy', l)
+
+                    # E[x^T x] = E[trace(x^T x)] = trace(E[x x^T]) = trace(covariance)
+                    self.losses.observe(torch.trace(covariances_layerwise[l]), self.label + '_epoch_norm', l) 
+                    self.losses.observe(torch.trace(covariances_epochs_layerwise[l]), self.label + '_global_norm', l)
             
-                self.losses.observe(covariances.shape[-1], self.label + '_epoch_norm', 'd') 
-                self.losses.observe(covariances.shape[-1], self.label + '_global_norm', 'd') 
+                    self.losses.observe(covariances.shape[-1], self.label + '_epoch_norm', 'd') 
+                    self.losses.observe(covariances.shape[-1], self.label + '_global_norm', 'd') 
 
-                # ratios
-                self.losses.observe(anisotropy / hidden_dim, 'ratio', self.label + '_epoch_anisotropy', l)
-                self.losses.observe(global_anisotropy / hidden_dim, 'ratio', self.label + '_global_anisotropy', l)
-                # self.losses.observe(hidden_dim ** 0.75 / anisotropy, 'ratio_p0.75', self.label + '_epoch_anisotropy', l)
-                # self.losses.observe(hidden_dim ** 0.75 / global_anisotropy, 'ratio_p0.75', self.label + '_global_anisotropy', l)
-                if not self.clipped:
-                    self.losses.observe(hidden_dim / torch.trace(covariances_layerwise[l]), 'ratio', self.label + '_epoch_norm', l) 
-                    self.losses.observe(hidden_dim / torch.trace(covariances_epochs_layerwise[l]), 'ratio', self.label + '_global_norm', l)
-        
-        
-        
+                    # ratios
+                    self.losses.observe(anisotropy / hidden_dim, 'ratio', self.label + '_epoch_anisotropy', l)
+                    self.losses.observe(global_anisotropy / hidden_dim, 'ratio', self.label + '_global_anisotropy', l)
+                    # self.losses.observe(hidden_dim ** 0.75 / anisotropy, 'ratio_p0.75', self.label + '_epoch_anisotropy', l)
+                    # self.losses.observe(hidden_dim ** 0.75 / global_anisotropy, 'ratio_p0.75', self.label + '_global_anisotropy', l)
+                    if not self.clipped:
+                        self.losses.observe(hidden_dim / torch.trace(covariances_layerwise[l]), 'ratio', self.label + '_epoch_norm', l) 
+                        self.losses.observe(hidden_dim / torch.trace(covariances_epochs_layerwise[l]), 'ratio', self.label + '_global_norm', l)
+            
             self.covariances = None
+
     def after_testing(self):
         if self.covariances is None:
             return
@@ -246,8 +255,8 @@ class CovariancePlugin(Plugin):
         pass
     
 class SampleCovariancePlugin(CovariancePlugin):
-    def __init__(self, controller_identifier, clipped=True, activated_on_training=False, log_per_step=1, centered=False):
-        super().__init__(controller_identifier=controller_identifier, label='sample', clipped=clipped, activated_on_training=activated_on_training, log_per_step=log_per_step, centered=centered)
+    def __init__(self, controller_identifier, clipped=True, activated_on_training=False, log_per_step=1, centered=False, args=None):
+        super().__init__(controller_identifier=controller_identifier, label='sample', clipped=clipped, activated_on_training=activated_on_training, log_per_step=log_per_step, centered=centered, args=args)
     def hook_type(self):
         return InputHook()
     def register_hook(self, layer: nn.Module, hook):
@@ -270,9 +279,9 @@ class MixingMlpGradientHook(MlpGradientHook):
         return torch.cat(res, dim=0)
     
 class GradientCovariancePlugin(CovariancePlugin):
-    def __init__(self, controller_identifier, clipped=True, activated_on_training=False, log_per_step=1, centered=False):
+    def __init__(self, controller_identifier, clipped=True, activated_on_training=False, log_per_step=1, centered=False, args=None):
         assert activated_on_training
-        super().__init__(controller_identifier=controller_identifier, label='gradient', clipped=clipped, activated_on_training=activated_on_training, log_per_step=log_per_step, centered=centered)
+        super().__init__(controller_identifier=controller_identifier, label='gradient', clipped=clipped, activated_on_training=activated_on_training, log_per_step=log_per_step, centered=centered, args=args)
         self.grad_switch: torch.set_grad_enabled = None
         self.model: BaseModule = None
     def hook_type(self):
@@ -415,10 +424,10 @@ def get_parser():
     parser.add_argument('--title', type=str, default='sample_gradient_covariance')
     parser.add_argument('--n-hidden-layer', type=int, default=4)
     parser.add_argument('--dim-hidden', type=int, default=128)
-    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=0.0)
     parser.add_argument('--batch-size', type=int, default=32)
-    parser.add_argument('--image-size', type=int, default=28)
+    parser.add_argument('--image-size', type=int, default=32)
     parser.add_argument('--centered', action='store_true')
     parser.add_argument('--n-epochs', type=int, default=100)
     parser.add_argument('--dont-clip-vectors', action='store_true')
@@ -426,19 +435,41 @@ def get_parser():
     parser.add_argument('--centralized', action='store_true')
     parser.add_argument('--training', action='store_true')
     parser.add_argument('--log-per-step', type=int, default=20)
+    parser.add_argument('--threshold', type=float, default=1e-6)
     return parser
+
+def effective_T(weight_decay, threshold):
+    if weight_decay <= 0.0:
+        return float('inf')
+    r = math.sqrt(1 - weight_decay)
+    """
+        the total weight of the tail after k steps is given by sum_{i=k}^inf r^i = r^k (1 - r^inf) / (1 - r)
+        so to make tail smaller than the threshold, one needs r^k (1 - r^inf) / (1 - r) <= threshold <== r^k <= threshold <=> k >= log(threshold) / log(r)
+    """
+    eff_T = math.log(threshold * (1-r)) / math.log(r) - 1
+    print(
+        f'weight_decay: {weight_decay}',
+        f'threshold: {threshold}',
+        f'effective_T: {eff_T}'
+    )
+    return int(math.ceil(eff_T))
+
 
 def main():
     parser = get_parser()
-    args = parser.parse_known_args()[0]
+    all_args = parser.parse_known_args()
+    args = all_args[0]
+    unknown_args = all_args[1]
+    assert len(unknown_args) == 2 and unknown_args[0] == '--device', unknown_args
+    setattr(args, 'effective_T', effective_T(args.weight_decay, args.threshold))
     
-    writer, _ = new_experiment(args.title + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur')
+    writer, _ = new_experiment(args.title + '/' + f'wd{args.weight_decay}' + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur')
     start_tensorboard_server(writer.get_logdir())
 
     controller_id = 'control'
 
     def new_covariance(plugin_type, controller_id):
-        sample_covariance = plugin_type(controller_id, clipped=~args.dont_clip_vectors, activated_on_training=args.training, log_per_step=args.log_per_step, centered=args.centered)
+        sample_covariance = plugin_type(controller_id, clipped=~args.dont_clip_vectors, activated_on_training=args.training, log_per_step=args.log_per_step, centered=args.centered, args=args)
         return sample_covariance
 
     sample_covariance = new_covariance(SampleCovariancePlugin, controller_id)
@@ -457,15 +488,15 @@ def main():
         )
 
 
-    model = ParallelModel(
-        [make_single_model(i, args.centralized) for i in range(args.n_parallel_models)],
-        ForcedERM() if not args.training else ERM(),
-        *([   sample_covariance,
-            gradient_covariance,
-        ] if args.centralized else []),
-        writer=writer,
-        identifier=controller_id
-    )
+    # model = ParallelModel(
+        # [make_single_model(i, args.centralized) for i in range(args.n_parallel_models)],
+        # ForcedERM() if not args.training else ERM(),
+        # *([   sample_covariance,
+            # gradient_covariance,
+        # ] if args.centralized else []),
+        # writer=writer,
+        # identifier=controller_id
+    # )
 
     model = Model(
         MnistMLP(
@@ -477,7 +508,7 @@ def main():
         new_covariance(SampleCovariancePlugin, None),
         new_covariance(GradientCovariancePlugin, None),
         writer=writer,
-    )
+    ).to(device)
 
     train_transform = transforms.Compose([
         transforms.RandomCrop(args.image_size, 16),
@@ -487,9 +518,9 @@ def main():
     test_transform = transforms.ToTensor()
 
     train_dataset = WrapperDataset(MNIST('data/mnist', True, transform=train_transform, download=True))
-    train_dataloader = ZipCollator(
-            *[DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True) for i in range(args.n_parallel_models)]
-    )
+    # train_dataloader = ZipCollator(
+            # *[DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True) for i in range(args.n_parallel_models)]
+    # )
     train_dataloader = DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True)
     
     # test_dataset = MNIST('data/mnist', False, transform=test_transform, download=True)
@@ -506,10 +537,11 @@ def main():
         lr=args.lr,
         test_batch=100000000,
         save_every_epoch=None,
-        optimizer='AdamW',
+        optimizer='SGD',
         weight_decay=args.weight_decay,
         writer=writer,
-        scheduler_maker=linear_scheduler_maker
+        scheduler_maker=linear_scheduler_maker,
+        initial_test=False
     )
 
     trainer.run()

@@ -18,7 +18,7 @@ implicit_adversarial_samples=1
 rezero=0
 careful_bias_initialization=0
 
-for optimizer in Adam SGD
+for optimizer in Adam
 do
 for lr in 1e-4 1e-5
 do
