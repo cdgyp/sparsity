@@ -50,12 +50,12 @@ class MnistMLP(BaseModule):
             self.scale = sqrt(self.hidden_dim)
         def forward(self, x):
             return x / self.scale
-    def __init__(self, image_size=64, n_hidden_layer=4, dim_hidden=128, n_class=10):
+    def __init__(self, image_size=64, n_hidden_layer=4, dim_hidden=128, n_class=10, affine_parameter=True):
         super().__init__()
         self.initial = nn.Linear(image_size ** 2, dim_hidden)
         self.hidden = nn.ModuleList([
             nn.Sequential(
-                nn.LayerNorm(dim_hidden),
+                nn.LayerNorm(dim_hidden, elementwise_affine=affine_parameter),
                 # MnistMLP.UnitNorm(dim_hidden),
                 self.HiddenLayer(dim_hidden, index=i)
             )   
@@ -436,6 +436,7 @@ def get_parser():
     parser.add_argument('--training', action='store_true')
     parser.add_argument('--log-per-step', type=int, default=20)
     parser.add_argument('--threshold', type=float, default=1e-6)
+    parser.add_argument('--no-affine', action='store_true', help="Turn off affine parameters in LayerNorm layers")
     return parser
 
 def effective_T(weight_decay, threshold):
@@ -464,7 +465,7 @@ def main():
     setattr(args, 'effective_T', effective_T(args.weight_decay, args.threshold))
     
     writer, _ = new_experiment(args.title + '/' + f'wd{args.weight_decay}' + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur')
-    start_tensorboard_server(writer.get_logdir())
+    # start_tensorboard_server(writer.get_logdir())
 
     controller_id = 'control'
 
@@ -502,7 +503,8 @@ def main():
         MnistMLP(
             image_size=args.image_size,
             n_hidden_layer=args.n_hidden_layer,
-            dim_hidden=args.dim_hidden
+            dim_hidden=args.dim_hidden,
+            affine_parameter=not args.no_affine
         ),
         ERM(),
         new_covariance(SampleCovariancePlugin, None),
