@@ -469,7 +469,7 @@ def main():
     assert len(unknown_args) == 2 and unknown_args[0] == '--device', unknown_args
     setattr(args, 'effective_T', effective_T(args.lr, args.weight_decay, args.threshold))
     
-    writer, _ = new_experiment(args.title + '/' + f'wd{args.weight_decay}' + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur')
+    writer, _ = new_experiment(args.title + '/' + f'wd{args.weight_decay}' + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur', git_wip=False)
     # start_tensorboard_server(writer.get_logdir())
 
     controller_id = 'control'
@@ -528,7 +528,7 @@ def main():
     # train_dataloader = ZipCollator(
             # *[DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True) for i in range(args.n_parallel_models)]
     # )
-    train_dataloader = DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True)
+    train_dataloader = DataLoader(train_dataset, args.batch_size, True, num_workers=16, drop_last=True, pin_memory=True)
     
     # test_dataset = MNIST('data/mnist', False, transform=test_transform, download=True)
     # test_dataloader = DataLoader(test_dataset, args.batch_size, True, num_workers=8)

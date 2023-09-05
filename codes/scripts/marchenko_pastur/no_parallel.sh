@@ -1,10 +1,10 @@
 threshold=1e-3
 
-partition_1="16    128      336       512    "
-partition_2="   64     224      400"
+partition_1="336    128  624"
+partition_2="400    224      512"
 
-partition_2_1="624      800       1024"
-partition_2_2="    720       912"
+partition_2_1="1024      800       16"
+partition_2_2="912    720       64"
 
 wd_partition_1="0.1 0.01"
 wd_partition_2="0.001 0.0"
@@ -20,7 +20,6 @@ extra="$@"
 
 for n in ${!partition_name};
 do
-args="--dim-hidden $n --training --n-parallel-models 1 --centralized --threshold $threshold --no-affine $extra"
+args="--dim-hidden $n --training --n-parallel-models 1 --centralized --threshold $threshold --no-affine --n-epochs 50 $extra"
 python -m codes.scripts.marchenko_pastur.mnist --device $DEVICE $args
 done
-
