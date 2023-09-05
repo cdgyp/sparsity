@@ -1,3 +1,6 @@
+import multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
+
 import math
 import torch
 from torch import Tensor, nn
@@ -8,6 +11,7 @@ from torch.optim.lr_scheduler import LinearLR
 from torchvision import transforms
 import argparse
 import einops
+from PIL import Image
 
 from torch.utils.tensorboard import SummaryWriter
 from math import sqrt
@@ -19,6 +23,30 @@ from ...base import BaseModule, Model, Plugin, InputHook, IndexedHook, Training,
 from ...base import expand_groundtruth
 from ...modules.hooks import MlpGradientHook
 
+class InMemoryMNIST(MNIST):
+    """
+        by ChatGPT
+    """
+    def __init__(self, *args, device='cpu', **kwargs):
+        super(InMemoryMNIST, self).__init__(*args, **kwargs)
+
+        # 加载数据到内存并转移到显存
+        self.data_memory = [(transforms.ToTensor()(Image.fromarray(img.numpy(), mode='L')).to(device), target.to(device)) for img, target in zip(self.data, self.targets)]
+
+    def __getitem__(self, index):
+        img, target = self.data_memory[index]
+
+        # 如果有转换，直接在显存上应用它们
+        if self.transform is not None:
+            with torch.cuda.device_of(img):  # 确保在正确的GPU上进行操作
+                img = self.transform(img)
+
+        if self.target_transform is not None:
+            with torch.cuda.device_of(target):
+                target = self.target_transform(target)
+
+        return img, target
+
 class MixingInputHook(InputHook):
     def __init__(self) -> None:
         super().__init__()
@@ -29,7 +57,6 @@ class MixingInputHook(InputHook):
         res = self.tokens
         self.tokens = []
         return torch.cat(res, dim=0)
-
 
 
 class MnistMLP(BaseModule):
@@ -392,6 +419,14 @@ class ParallelModule(BaseModule):
                 return self._output(outputs=res)
             return wrapped
     
+class ConditionalToTensor:
+    def __init__(self):
+        self.to_tensor = transforms.ToTensor()
+
+    def __call__(self, pic):
+        if isinstance(pic, torch.Tensor):
+            return pic
+        return self.to_tensor(pic)
 
 class ParallelModel(Model):
     def __init__(self, models: 'list[BaseModule]', *plugins: Plugin, writer: SummaryWriter = None, identifier=None):
@@ -441,6 +476,7 @@ def get_parser():
     parser.add_argument('--log-per-step', type=int, default=20)
     parser.add_argument('--threshold', type=float, default=1e-6)
     parser.add_argument('--no-affine', action='store_true', help="Turn off affine parameters in LayerNorm layers")
+    parser.add_argument('--dataset-in-memory', action='store_true')
     return parser
 
 def effective_T(learning_rate, weight_decay, threshold):
@@ -520,15 +556,18 @@ def main():
     train_transform = transforms.Compose([
         transforms.RandomCrop(args.image_size, 16),
         transforms.RandomRotation(30),
-        transforms.ToTensor(),
+        ConditionalToTensor(),
     ])
     test_transform = transforms.ToTensor()
 
-    train_dataset = WrapperDataset(MNIST('data/mnist', True, transform=train_transform, download=True))
+    if args.dataset_in_memory:
+        train_dataset = WrapperDataset(InMemoryMNIST('data/mnist', True, transform=train_transform, download=True, device=device))
+    else:
+        train_dataset = WrapperDataset(MNIST('data/mnist', True, transform=train_transform, download=True))
     # train_dataloader = ZipCollator(
             # *[DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True) for i in range(args.n_parallel_models)]
     # )
-    train_dataloader = DataLoader(train_dataset, args.batch_size, True, num_workers=16, drop_last=True, pin_memory=True)
+    train_dataloader = DataLoader(train_dataset, args.batch_size, True, num_workers=8, drop_last=True, pin_memory=True)
     
     # test_dataset = MNIST('data/mnist', False, transform=test_transform, download=True)
     # test_dataloader = DataLoader(test_dataset, args.batch_size, True, num_workers=8)

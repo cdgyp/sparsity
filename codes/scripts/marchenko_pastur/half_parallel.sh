@@ -1,7 +1,7 @@
 threshold=1e-3
 
 
-session_name="marchenko-pastur-$PARTITION"
+session_name="marchenko-pastur-$PARTITION$SUFFIX"
 
 extra="$@"
 
