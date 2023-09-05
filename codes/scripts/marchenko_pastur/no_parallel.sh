@@ -17,15 +17,10 @@ wd_partition_name=wd_partition_$WD_PARTITION
 
 extra="$@"
 
-tmux new-session -d -s $session_name
 
-for wd in ${!wd_partition_name};
-do
 for n in ${!partition_name};
 do
-args="--dim-hidden $n --training --n-parallel-models 1 --centralized --weight-decay $wd --threshold $threshold --no-affine $extra"
-tmux send-keys -t $session_name "python -m codes.scripts.marchenko_pastur.mnist --device $DEVICE $args" C-m
-tmux new-window -t $session_name
-done
+args="--dim-hidden $n --training --n-parallel-models 1 --centralized --threshold $threshold --no-affine $extra"
+python -m codes.scripts.marchenko_pastur.mnist --device $DEVICE $args
 done
 

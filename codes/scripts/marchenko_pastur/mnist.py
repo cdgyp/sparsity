@@ -85,7 +85,11 @@ class CovariancePlugin(Plugin):
         self.controller_identifier = controller_identifier
         self.activated_on_training = activated_on_training
         self.log_per_step = log_per_step
-        self.decay = 1 - args.weight_decay
+        self.decay = 1 - args.lr * args.weight_decay
+        """
+            this decay factor is used for empirical coveriance matrix H H^T or U U^T instead of H or U, 
+            so the decay fatcor is squared
+        """ 
         self.effective_T = args.effective_T
         self.hidden_dim = args.dim_hidden
         self.batch_size = args.batch_size
@@ -439,16 +443,17 @@ def get_parser():
     parser.add_argument('--no-affine', action='store_true', help="Turn off affine parameters in LayerNorm layers")
     return parser
 
-def effective_T(weight_decay, threshold):
+def effective_T(learning_rate, weight_decay, threshold):
     if weight_decay <= 0.0:
         return float('inf')
-    r = math.sqrt(1 - weight_decay)
+    r = 1 - learning_rate * weight_decay
     """
         the total weight of the tail after k steps is given by sum_{i=k}^inf r^i = r^k (1 - r^inf) / (1 - r)
         so to make tail smaller than the threshold, one needs r^k (1 - r^inf) / (1 - r) <= threshold <== r^k <= threshold <=> k >= log(threshold) / log(r)
     """
     eff_T = math.log(threshold * (1-r)) / math.log(r) - 1
     print(
+        f'learning_rate: {learning_rate}',
         f'weight_decay: {weight_decay}',
         f'threshold: {threshold}',
         f'effective_T: {eff_T}'
@@ -462,7 +467,7 @@ def main():
     args = all_args[0]
     unknown_args = all_args[1]
     assert len(unknown_args) == 2 and unknown_args[0] == '--device', unknown_args
-    setattr(args, 'effective_T', effective_T(args.weight_decay, args.threshold))
+    setattr(args, 'effective_T', effective_T(args.lr, args.weight_decay, args.threshold))
     
     writer, _ = new_experiment(args.title + '/' + f'wd{args.weight_decay}' + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur')
     # start_tensorboard_server(writer.get_logdir())
@@ -528,9 +533,6 @@ def main():
     # test_dataset = MNIST('data/mnist', False, transform=test_transform, download=True)
     # test_dataloader = DataLoader(test_dataset, args.batch_size, True, num_workers=8)
     
-    def linear_scheduler_maker(optimizer):
-        return LinearLR(optimizer=optimizer, start_factor=1.0, end_factor=0.01, total_iters=args.n_epochs)
-
     trainer = Training(
         n_epoch=args.n_epochs,
         model=DeviceSetter(model.to(device)),
@@ -542,7 +544,7 @@ def main():
         optimizer='SGD',
         weight_decay=args.weight_decay,
         writer=writer,
-        scheduler_maker=linear_scheduler_maker,
+        scheduler_maker=None,
         initial_test=False
     )
 
