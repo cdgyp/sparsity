@@ -545,7 +545,8 @@ def main():
         weight_decay=args.weight_decay,
         writer=writer,
         scheduler_maker=None,
-        initial_test=False
+        initial_test=False,
+        test_every_epoch=5
     )
 
     trainer.run()
