@@ -1,5 +1,5 @@
-runs_root="runs/marchenko_pastur/weight_decay"
-dump_root="dumps/mp/weight_decay"
+runs_root="runs/marchenko_pastur/lr"
+dump_root="dumps/mp/lr"
 
 for wd in $(ls $runs_root/)
 do

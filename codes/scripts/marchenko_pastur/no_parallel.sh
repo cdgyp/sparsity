@@ -20,6 +20,9 @@ extra="$@"
 
 for n in ${!partition_name};
 do
-args="--dim-hidden $n --training --n-parallel-models 1 --centralized --threshold $threshold --no-affine --n-epochs 50 $extra"
-python -m codes.scripts.marchenko_pastur.mnist --device $DEVICE $args
+log_dir="runs/marchenko_pastur/$TITLE/wd$wd/$n"
+if [ -d "$log_dir" ]; then
+    args="--dim-hidden $n --training --n-parallel-models 1 --centralized --threshold $threshold --no-affine --n-epochs 100 --weight-decay $wd --title $TITLE $extra"
+    python -m codes.scripts.marchenko_pastur.mnist --device $DEVICE $args
+fi
 done
