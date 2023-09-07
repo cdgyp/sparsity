@@ -13,6 +13,6 @@ do
         --clip-grad-norm 1 --ra-sampler --cutmix-alpha 1.0 \
         --amp \
         --device $DEVICE  --log_per_step 20 --physical-epochs 300 \
-        --implicit-adversarial-samples-clipping 1.0\
+        --implicit-adversarial-samples-clipping 0.1\
         "$@"
 done
