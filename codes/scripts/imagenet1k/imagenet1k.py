@@ -86,6 +86,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
                 model.losses.log_losses(model.iteration)
             model.iteration += 1
             model.losses.reset()
+            if args.max_iteration is not None and model.iteration >= args.max_iteration:
+                return
 
 
 
@@ -435,6 +437,8 @@ def main(args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
+        if isinstance(model, Model) and args.max_iteration is not None and model.iteration >= args.max_iteration:
+            return
         lr_scheduler.step()
         evaluate(model, criterion, data_loader_test, device=device)
         if model_ema:
@@ -598,6 +602,8 @@ def get_args_parser(add_help=True):
     parser.add_argument("--wide", action="store_true", help="turn on wide MLP for transformers")
     parser.add_argument("--dont-resume-lr-schedulers", action="store_true")
     parser.add_argument("--warmup_phase", type=float, default=1.0, help="length relative to 2 Pi, indicating how many epochs are under warmup")
+    parser.add_argument("--max-iteration", type=int, default=None, help="maximum number of iterations, only used in profiling")
+    parser.add_argument("--no-affine", action='store_true', help="where to force off affine parameters in LayerNorm layers. When model is sparsified, the affine parameters are automatically turned off")
     return parser
 
 

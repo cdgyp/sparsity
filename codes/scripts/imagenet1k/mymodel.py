@@ -1,5 +1,6 @@
 import torch
 import os
+from functools import partial
 from torch.utils.data import DataLoader
 def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1):
     from ...base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
@@ -13,6 +14,9 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
         dir = args.resume[:args.resume.find('save')]
     else:
         dir = 'imagenet1k/' + args.title + '/' + f'{(model_type)}'
+    
+    if sparsified:
+        args.no_affine=True
 
     writer, _ = new_experiment(dir, None, dir_to_runs='runs', resume=args.resume is not None and len(args.resume) > 0)
 
@@ -26,7 +30,8 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
             relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
                 'num_classes': 1000,
                 'rezero': False,
-                'implicit_adversarial_samples': sparsified
+                'implicit_adversarial_samples': sparsified,
+                'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6, elementwise_affine=not args.no_affine)
             })
         ),
         # ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
@@ -44,7 +49,7 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
     model.epoch = start_epoch
     model.losses = LossManager(writer=writer)
     # start_tensorboard_server(writer.log_dir)
-    args.output_dir = os.path.join(writer.log_dir, 'save')
+    args.output_dir = os.path.join(writer.logdir, 'save')
 
     if sparsified:
         # make parameters of dynamic modules of implicit adversarial samples ready
@@ -52,4 +57,4 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
             X, Y = next(iter(dataloader))
             pred = model(X.to(args.device)[:args.physical_batch_size])
 
-    return model.to(args.device)
+    return model
