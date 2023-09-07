@@ -134,7 +134,8 @@ class EncoderBlock(nn.Module):
         self.mlp = MLPBlock(hidden_dim, mlp_dim, dropout)
         self.rezero = rezero
         if self.rezero:
-            self.alpha = nn.Parameter(torch.tensor([0.0]))
+            self.alpha_1 = nn.Parameter(torch.tensor([0.0]))
+            self.alpha_2 = nn.Parameter(torch.tensor([0.0]))
 
     def forward(self, input: torch.Tensor):
         torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
@@ -145,18 +146,19 @@ class EncoderBlock(nn.Module):
         x, _ = self.self_attention(query=x, key=x, value=x, need_weights=False)
         x = self.dropout(x)
         if self.rezero:
-            x = input + self.alpha * x
+            x = input + self.alpha_1 * x
             y = x
         else:
             x = x + input
-            y = self.ln_2(x)
+        
+        y = self.ln_2(x)
 
 
         if self.implicit_adversarial_samples is not None:
             y = self.implicit_adversarial_samples(y)
         y = self.mlp(y)
         if self.rezero:
-            z = x + self.alpha * y
+            z = x + self.alpha_2 * y
         else:
             z = x + y
         
