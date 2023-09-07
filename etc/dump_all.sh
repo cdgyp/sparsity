@@ -52,3 +52,5 @@ done
 
 
 python etc/dump.py --source-dir "runs/imagenet1k/from_scratch4/sparsified/20230809-160718/activation_concentration_(train)_[obs]activation/" --output-dir dumps/imagenet1k/sparsified/from_scratch4/ --filter-dname '4' '7' '8' '10'
+
+bash etc/dump_mp.sh
