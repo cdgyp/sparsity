@@ -713,7 +713,7 @@ def main():
     has_tensorboard = is_tensorboard_available()
     if has_tensorboard and jax.process_index() == 0:
         try:
-            from flax.metrics.tensorboard import SummaryWriter
+            from tensorboardX import SummaryWriter
 
             summary_writer = SummaryWriter(log_dir=Path(training_args.output_dir))
         except ImportError as ie:

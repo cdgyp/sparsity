@@ -13,7 +13,7 @@ import argparse
 import einops
 from PIL import Image
 
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
 from math import sqrt
 from codes.base import BaseModule, Plugin
 
@@ -506,7 +506,7 @@ def main():
     setattr(args, 'effective_T', effective_T(args.lr, args.weight_decay, args.threshold))
     
     writer, _ = new_experiment(args.title + '/' + f'wd{args.weight_decay}' + '/' + str(args.dim_hidden), args=args, dir_to_runs='runs/marchenko_pastur', git_wip=False)
-    # start_tensorboard_server(writer.get_logdir())
+    # start_tensorboard_server(writer.logdir())
 
     controller_id = 'control'
 
