@@ -33,6 +33,7 @@ from enum import Enum
 from itertools import chain
 from pathlib import Path
 from typing import Dict, List, Optional
+from torch import nn
 
 # import flax
 # import jax
@@ -92,6 +93,7 @@ class TrainingArguments:
     per_device_eval_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
     )
+    max_steps: float = field(default=100000, metatdat={"help": 'Default value is the same as T5 training in "The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers".'})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
     adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
@@ -137,6 +139,30 @@ class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
     """
+
+    # Sparsification arguments
+    db_mlp: bool = field(
+        default=False,
+    )
+    jsrelu: bool = field(
+        default=False,
+    )
+    wide: bool = field(
+        default=False,
+    )
+
+    no_affine: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Turn off affine parameters in LayerNorm layers. Used in companion with `db_mlp`"
+            )
+        }
+    )
+    magic_synapse: bool = field(
+        default=False
+    )
+    
 
     model_name_or_path: Optional[str] = field(
         default=None,
@@ -195,7 +221,7 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    from_disk: Optional[bool] = field(
+    from_disk: bool = field(
         default=False, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
     dataset_name: Optional[str] = field(
@@ -800,38 +826,40 @@ def main():
         schedules=[warmup_fn, decay_fn], boundaries=[training_args.warmup_steps]
     )
 
-    # We use Optax's "masking" functionality to not apply weight decay
-    # to bias and LayerNorm scale parameters. decay_mask_fn returns a
-    # mask boolean with the same structure as the parameters.
-    # The mask is True for parameters that should be decayed.
-    def decay_mask_fn(params):
-        flat_params = traverse_util.flatten_dict(params)
-        # find out all LayerNorm parameters
-        layer_norm_candidates = ["layernorm", "layer_norm", "ln"]
-        layer_norm_named_params = {
-            layer[-2:]
-            for layer_norm_name in layer_norm_candidates
-            for layer in flat_params.keys()
-            if layer_norm_name in "".join(layer).lower()
-        }
-        flat_mask = {path: (path[-1] != "bias" and path[-2:] not in layer_norm_named_params) for path in flat_params}
-        return traverse_util.unflatten_dict(flat_mask)
+    def turn_off_affine_parameters(model: nn.Module):
+        for m in model.modules():
+            if isinstance(m, nn.LayerNorm):
+                m.elementwise_affine = False
+                if m.weight is not None:
+                    del m._parameters['weight']
+                    m.register_parameter('weight', None)
+                if m.bias is not None:
+                    del m._parameters['bias']
+                    m.register_parameter('bias', None)
+        return model
+    
+    if model_args.no_affine:
+        model = turn_off_affine_parameters(model)
+    else:
+        # We use Optax's "masking" functionality to not apply weight decay
+        # to bias and LayerNorm scale parameters. decay_mask_fn returns a
+        # mask boolean with the same structure as the parameters.
+        # The mask is True for parameters that should be decayed.
+        def decay_mask_fn(params):
+            flat_params = traverse_util.flatten_dict(params)
+            # find out all LayerNorm parameters
+            layer_norm_candidates = ["layernorm", "layer_norm", "ln"]
+            layer_norm_named_params = {
+                layer[-2:]
+                for layer_norm_name in layer_norm_candidates
+                for layer in flat_params.keys()
+                if layer_norm_name in "".join(layer).lower()
+            }
+            flat_mask = {path: (path[-1] != "bias" and path[-2:] not in layer_norm_named_params) for path in flat_params}
+            return traverse_util.unflatten_dict(flat_mask)
+        TODO
 
-    # # create adam optimizer
-    # if training_args.adafactor:
-        # # We use the default parameters here to initialize adafactor,
-        # # For more details about the parameters please check https://github.com/deepmind/optax/blob/ed02befef9bf81cbbf236be3d2b0e032e9ed4a40/optax/_src/alias.py#L74
-        # optimizer = optax.adafactor(
-            # learning_rate=linear_decay_lr_schedule_fn,
-        # )
-    # else:
-        # optimizer = optax.adamw(
-            # learning_rate=linear_decay_lr_schedule_fn,
-            # b1=training_args.adam_beta1,
-            # b2=training_args.adam_beta2,
-            # weight_decay=training_args.weight_decay,
-            # mask=decay_mask_fn,
-        # )
+
 
     trainer_argument = Seq2SeqTrainingArguments(
         training_args.output_dir,
@@ -848,11 +876,11 @@ def main():
         **{key: value for key, value in training_args.to_dict().items() if 'adam' in key},
         max_grad_norm=1,
         num_train_epochs=training_args.num_train_epochs,
-        max_steps=TODO,
+        max_steps=training_args.max_steps,
         lr_scheduler_type=TODO,
         warmup_ratio=TODO,
         warmup_steps=training_args.warmup_steps,
-        optim="adafactor" if training_args.adafactor else "adamw_torch"
+        optim="adafactor" if training_args.adafactor else "adamw_torch",
     )
 
     trainer = Seq2SeqTrainer(
