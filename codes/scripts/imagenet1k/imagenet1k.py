@@ -35,15 +35,19 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
         optimizer.zero_grad()
         for minibatch_image, minibatch_target in zip(image.chunk(chunks, dim=0), target.chunk(chunks, dim=0)):
             with torch.cuda.amp.autocast(enabled=scaler is not None):
-                minibatch_output = model(minibatch_image)
-                minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
+                with torch.autograd.profiler.record_function("forward propagation"):
+                    minibatch_output = model(minibatch_image)
+                    minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
 
-                if scaler is not None:
-                    scaler.scale(minibatch_loss).backward()
-                else:
-                    minibatch_loss.backward()
+                with torch.autograd.profiler.record_function("backward"):
+                    if scaler is not None:
+                        scaler.scale(minibatch_loss).backward()
+                    else:
+                        minibatch_loss.backward()
             output.append(minibatch_output);loss.append(minibatch_loss)
-        output = torch.cat(output, dim=0); loss = torch.stack(loss, dim=0).sum()
+        
+        with torch.no_grad():
+            output = torch.cat(output, dim=0); loss = torch.stack(loss, dim=0).sum()
 
 
         if scaler is not None:
@@ -285,9 +289,11 @@ def main(args):
         pin_memory=True,
         collate_fn=collate_fn,
         drop_last=True,
+        persistent_workers=True
     )
     data_loader_test = torch.utils.data.DataLoader(
-        dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True, drop_last=True
+        dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True, drop_last=True,
+        persistent_workers=True
     )
 
     if args.resume:
@@ -432,35 +438,39 @@ def main(args):
         return
 
     print("Start training")
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.physical_epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
-        train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
-        if isinstance(model, Model) and args.max_iteration is not None and model.iteration >= args.max_iteration:
-            return
-        lr_scheduler.step()
-        evaluate(model, criterion, data_loader_test, device=device)
-        if model_ema:
-            evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
-        if args.output_dir:
-            checkpoint = {
-                "model": model_without_ddp.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "lr_scheduler": lr_scheduler.state_dict(),
-                "epoch": epoch,
-                "args": args,
-            }
-            if model_ema:
-                checkpoint["model_ema"] = model_ema.state_dict()
-            if scaler:
-                checkpoint["scaler"] = scaler.state_dict()
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+    with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
+        start_time = time.time()
+        for epoch in range(args.start_epoch, args.physical_epochs):
+            with torch.autograd.profiler.record_function("training"):
+                if args.distributed:
+                    train_sampler.set_epoch(epoch)
+                train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
+                if isinstance(model, Model) and args.max_iteration is not None and model.iteration >= args.max_iteration:
+                    break
+                lr_scheduler.step()
+                evaluate(model, criterion, data_loader_test, device=device)
+                if model_ema:
+                    evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
+                if args.output_dir:
+                    checkpoint = {
+                        "model": model_without_ddp.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "lr_scheduler": lr_scheduler.state_dict(),
+                        "epoch": epoch,
+                        "args": args,
+                    }
+                    if model_ema:
+                        checkpoint["model_ema"] = model_ema.state_dict()
+                    if scaler:
+                        checkpoint["scaler"] = scaler.state_dict()
+                    utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+                    utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Training time {total_time_str}")
+    if prof is not None:
+        print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
 
 def get_args_parser(add_help=True):
@@ -609,4 +619,5 @@ def get_args_parser(add_help=True):
 
 if __name__ == "__main__":
     args = get_args_parser().parse_args()
+    # main_opt = torch.compile(main, mode='reduce-overhead')
     main(args)

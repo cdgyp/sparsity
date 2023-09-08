@@ -4,7 +4,7 @@ export https_proxy=
 # EMA is disabled due to model references between plugins which cannot be maintained in deepcopying
 for model in ${MODELS[@]};
 do
-    python -m codes.scripts.imagenet1k.imagenet1k   \
+    echo python -m codes.scripts.imagenet1k.imagenet1k   \
         --model $model --start-epoch 0 --epochs 300 --batch-size 512 --physical-batch-size 64 --opt adamw --lr 0.003 --wd 0.3 \
         --from-scratch\
         --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \

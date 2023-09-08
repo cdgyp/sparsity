@@ -39,7 +39,7 @@ from typing import Dict, List, Optional
 # import jax.numpy as jnp
 import numpy as np
 # import optax
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 import evaluate
 # from flax import jax_utils, traverse_util
 # from flax.jax_utils import pad_shard_unpad
@@ -195,6 +195,9 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
+    from_disk: Optional[bool] = field(
+        default=False, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -553,28 +556,42 @@ def main():
     # 'text' is found. You can easily tweak this behavior (see below).
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=model_args.cache_dir,
-            token=model_args.token,
-        )
+        if data_args.from_disk:
+            datasets = load_from_disk(
+                data_args.dataset_name,
+            )
+        else:
+            datasets = load_dataset(
+                data_args.dataset_name,
+                data_args.dataset_config_name,
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+            )
 
         if "validation" not in datasets.keys():
-            datasets["validation"] = load_dataset(
-                data_args.dataset_name,
-                data_args.dataset_config_name,
-                split=f"train[:{data_args.validation_split_percentage}%]",
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-            )
-            datasets["train"] = load_dataset(
-                data_args.dataset_name,
-                data_args.dataset_config_name,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-                token=model_args.token,
-            )
+            datasets = {}
+            if data_args.fomr_disk:
+                datasets["validation"] = load_from_disk(
+                    os.path.join(data_args.dataset_name, 'validation'),
+                )
+                datasets["train"] = load_from_disk(
+                    os.path.join(data_args.dataset_name, 'train'),
+                )
+            else:
+                datasets["validation"] = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split=f"train[:{data_args.validation_split_percentage}%]",
+                    cache_dir=model_args.cache_dir,
+                    token=model_args.token,
+                )
+                datasets["train"] = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split=f"train[{data_args.validation_split_percentage}%:]",
+                    cache_dir=model_args.cache_dir,
+                    token=model_args.token,
+                )
     else:
         data_files = {}
         if data_args.train_file is not None:
@@ -800,21 +817,21 @@ def main():
         flat_mask = {path: (path[-1] != "bias" and path[-2:] not in layer_norm_named_params) for path in flat_params}
         return traverse_util.unflatten_dict(flat_mask)
 
-    # create adam optimizer
-    if training_args.adafactor:
-        # We use the default parameters here to initialize adafactor,
-        # For more details about the parameters please check https://github.com/deepmind/optax/blob/ed02befef9bf81cbbf236be3d2b0e032e9ed4a40/optax/_src/alias.py#L74
-        optimizer = optax.adafactor(
-            learning_rate=linear_decay_lr_schedule_fn,
-        )
-    else:
-        optimizer = optax.adamw(
-            learning_rate=linear_decay_lr_schedule_fn,
-            b1=training_args.adam_beta1,
-            b2=training_args.adam_beta2,
-            weight_decay=training_args.weight_decay,
-            mask=decay_mask_fn,
-        )
+    # # create adam optimizer
+    # if training_args.adafactor:
+        # # We use the default parameters here to initialize adafactor,
+        # # For more details about the parameters please check https://github.com/deepmind/optax/blob/ed02befef9bf81cbbf236be3d2b0e032e9ed4a40/optax/_src/alias.py#L74
+        # optimizer = optax.adafactor(
+            # learning_rate=linear_decay_lr_schedule_fn,
+        # )
+    # else:
+        # optimizer = optax.adamw(
+            # learning_rate=linear_decay_lr_schedule_fn,
+            # b1=training_args.adam_beta1,
+            # b2=training_args.adam_beta2,
+            # weight_decay=training_args.weight_decay,
+            # mask=decay_mask_fn,
+        # )
 
     trainer_argument = Seq2SeqTrainingArguments(
         training_args.output_dir,
