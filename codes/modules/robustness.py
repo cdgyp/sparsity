@@ -1,9 +1,6 @@
 import torch
 from torch import nn
 
-from codes.base.base import BaseModule, Plugin
-from ..base import BaseModule, Plugin, ModuleReference
-
 class ZerothBias(nn.Module):
     def __init__(self, clipping: float=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
         """
@@ -46,43 +43,47 @@ class DoublyBiased(nn.Module):
         y = self.linear(x)
         z = self.zeroth_bias(y)
         return z
+    
+try:
+    from ..base import BaseModule, Plugin, ModuleReference
 
-class WrappedImplicitAdversarialSample(BaseModule, ZerothBias):
-    def __init__(self, clipping=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
-        BaseModule.__init__(self)
-        ZerothBias.__init__(self, clipping=clipping, shape=shape, layer_norm=layer_norm)
-    def forward(self, x: torch.Tensor):
-        res = ZerothBias.forward(self, x)
-        self.losses.observe(self.biases.abs().mean(), 'implicit_adversarial_samples')
-        return res
+    class ZerothBiasPlugin(Plugin):
+        def __init__(self, clipping=None, log_per_step=1) -> None:
+            super().__init__()
+            self.clipping = abs(clipping) if clipping is not None else clipping
+            self.log_per_step = log_per_step
+        def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+            self.main = ModuleReference(main)
+            for module in self.main.modules():
+                if isinstance(module, ZerothBias):
+                    module.clipping = self.clipping
+        def _clip(self):
+            for module in self.main.modules():
+                if isinstance(module, ZerothBias):
+                    module.clip()
+        def prepare(self, Y: torch.Tensor, labeled: torch.Tensor, D: torch.Tensor):
+            self._clip()
+        def after_backward(self):
+            self._clip()
+            if self.iteration % self.log_per_step == 0:
+                for m in self.main.modeuls():
+                    if isinstance(m, ZerothBias):
+                        self.losses.observe(m.biases.abs().mean(), 'zeroth_biases')
 
-class ImplicitAdversarialSamplePlugin(Plugin):
-    def __init__(self, clipping=None) -> None:
-        super().__init__()
-        self.clipping = abs(clipping) if clipping is not None else clipping
-    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
-        self.main = ModuleReference(main)
-        for module in self.main.modules():
-            if isinstance(module, WrappedImplicitAdversarialSample):
-                module.clipping = self.clipping
-    def _clip(self):
-        for module in self.main.modules():
-            if isinstance(module, WrappedImplicitAdversarialSample):
-                module.clip()
-    def prepare(self, Y: torch.Tensor, labeled: torch.Tensor, D: torch.Tensor):
-        self._clip()
-    def after_backward(self):
-        self._clip()
-
-class RestrictAffinePlugin(Plugin):
-    def register(self, main: BaseModule, plugins: list[Plugin]):
-        self.main = ModuleReference(main)
-        for m in self.main.modules():
-            if isinstance(m, nn.LayerNorm):
-                del m._parameters['bias']
-                m.register_parameter('bias', None)
-    def after_backward(self):
-        for m in self.main.modules():
-            if isinstance(m, nn.LayerNorm) and hasattr(m, 'weight') and m is not None:
-                m.weight.clamp_(min=1)
+    class RestrictAffinePlugin(Plugin):
+        def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+            self.main = ModuleReference(main)
+            for m in self.main.modules():
+                if isinstance(m, nn.LayerNorm):
+                    del m._parameters['bias']
+                    m.register_parameter('bias', None)
+        def after_backward(self):
+            for m in self.main.modules():
+                if isinstance(m, nn.LayerNorm) and hasattr(m, 'weight') and m is not None:
+                    m.weight.clamp_(min=1)
         
+except ImportError as e:
+    if e.name == '..base':
+        pass
+    else:
+        raise e

@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from ..base import InputHook
 
 class MagicSynapse(nn.Module):
     def __init__(self, rho: float=0.1, linear: nn.Linear=None) -> None:
@@ -40,25 +39,30 @@ class MagicSynapse(nn.Module):
         print("MagicSynapse: totally {count} modules are perturbed")
         return model
 
-
-class MagicSynapseHook(InputHook):
-    def __init__(self, rho: float=0.1) -> None:
-        super().__init__()
-        self.magic_synapse = MagicSynapse(rho)
-    def __call__(self, module, input, output=None):
-        return self.magic_synapse(input, output, module)
-    def hook_on(model: nn.Module, rho: float=0.1):
-        """
-            Note `torch.compile()` in current versions does **not** support hooks. So use`MagicSynapse.plug_in()` if the model will be compiled
-        """
-        handles: 'list[torch.utils.hooks.RemovableHandle]' = []
-        count = 0
-        for name, m in model.named_modules():
-            if isinstance(m, nn.Linear):
-                h = m.register_forward_hook(MagicSynapseHook(rho))
-                handles.append(h)
-                print(f'\t\t {name}')
-                count += 1
-        print(MagicSynapse.__class__, 'replace {count} Linear layers')
-        return model, handles
-    
+try:
+    from ..base import InputHook
+    class MagicSynapseHook(InputHook):
+        def __init__(self, rho: float=0.1) -> None:
+            super().__init__()
+            self.magic_synapse = MagicSynapse(rho)
+        def __call__(self, module, input, output=None):
+            return self.magic_synapse(input, output, module)
+        def hook_on(model: nn.Module, rho: float=0.1):
+            """
+                Note `torch.compile()` in current versions does **not** support hooks. So use`MagicSynapse.plug_in()` if the model will be compiled
+            """
+            handles: 'list[torch.utils.hooks.RemovableHandle]' = []
+            count = 0
+            for name, m in model.named_modules():
+                if isinstance(m, nn.Linear):
+                    h = m.register_forward_hook(MagicSynapseHook(rho))
+                    handles.append(h)
+                    print(f'\t\t {name}')
+                    count += 1
+            print(MagicSynapse.__class__, 'replace {count} Linear layers')
+            return model, handles
+except ImportError as e:
+    if e.name == '..base':
+        pass
+    else:
+        raise e
