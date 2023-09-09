@@ -127,6 +127,8 @@ class TrainingArguments:
         default=None, metadata={"help": "The name of the repository to keep in sync with the local `output_dir`."}
     )
     hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
+    
+    resume:str = field(default=None, metadata="path to the checkpoint to be resumed")
 
     def __post_init__(self):
         if self.output_dir is not None:
@@ -517,20 +519,6 @@ class DataCollatorForT5MLM:
 
         return is_noise[:orig_length]
 
-def write_train_metric(summary_writer, train_metrics, train_time, step):
-    summary_writer.scalar("train_time", train_time, step)
-
-    train_metrics = get_metrics(train_metrics)
-    for key, vals in train_metrics.items():
-        tag = f"train_{key}"
-        for i, val in enumerate(vals):
-            summary_writer.scalar(tag, val, step - len(vals) + i + 1)
-
-
-def write_eval_metric(summary_writer, eval_metrics, step):
-    for metric_name, value in eval_metrics.items():
-        summary_writer.scalar(f"eval_{metric_name}", value, step)
-
 class T5Sparsify(Sparsify):
     def is_MLP(self, name: str, module: torch.nn.Module):
         return isinstance(module, T5LayerFF)
@@ -582,7 +570,7 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         db_mlp_shape=[max(inputs_length, targets_length), T5.config.d_model],
         rho=model_args.magic_synapse_rho,
         log_per_step=training_args.logging_steps,
-        steps=None,
+        steps=TODO,
         start_epoch=0,
         resume=training_args.resume,
     )
@@ -632,6 +620,41 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=training_args.warmup_steps, num_training_steps=training_args.max_steps)
     return optimizer, scheduler
 
+from torch.utils.tensorboard import SummaryWriter
+class TbMetric:
+    def __init__(self, eval_steps, writer: SummaryWriter) -> None:
+        self.writer = writer
+        self.eval_steps = eval_steps
+        self.count = 0
+    def _compute(self, logits, labels):
+        pass
+    def compute_metrics(self, eval_preds):
+        self.count += 1
+        logits, labels = eval_preds
+        res = self._compute(logits=logits, labels=labels)
+        self.writer.add_scalars(
+            main_tag='eval_metrics',
+            tag_scalar_dict=res,
+            global_step= self.count * self.eval_steps
+        )
+        return res
+
+class CrossEntropyMetric(TbMetric):
+    """
+        Directly using the training loss measured on testing samples. 
+        Some strange perplexity.
+    """
+    def __init__(self, eval_steps, writer: SummaryWriter) -> None:
+        super().__init__(eval_steps, writer)
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+
+    def _compute(self, logits, labels):
+        labels = labels.to(logits.device)
+        loss = self.loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+        return {
+            'ce': loss,
+        }
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -644,6 +667,7 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    model_args: ModelArguments; data_args: DataTrainingArguments; trainer_argument: TrainingArguments
 
     if model_args.use_auth_token is not None:
         warnings.warn("The `use_auth_token` argument is deprecated and will be removed in v4.34.", FutureWarning)
@@ -901,11 +925,15 @@ def main():
 
     trainer_argument = Seq2SeqTrainingArguments(
         training_args.output_dir,
+        logging_dir=training_args.output_dir,
         overwrite_output_dir=True,
         do_train=training_args.do_train,
         do_eval=training_args.do_eval,
         do_predict=False,
         evaluation_strategy="steps",
+        save_steps=training_args.save_steps,
+        eval_steps=training_args.eval_steps,
+        logging_steps=training_args.logging_steps,
         per_device_eval_batch_size=per_device_eval_batch_size,
         per_device_train_batch_size=training_args.per_device_train_batch_size,
         gradient_accumulation_steps=training_args.gradient_accumulation_steps,
@@ -920,6 +948,8 @@ def main():
         warmup_steps=None,
     )
 
+    metric = CrossEntropyMetric(training_args.eval_step, writer=summary_writer)
+
     trainer = Seq2SeqTrainer(
         model=model,
         args=trainer_argument,
@@ -927,11 +957,12 @@ def main():
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
         optimizers=optimizer_scheduler,
+        compute_metrics=metric.compute_metrics,
     )
 
-
-
-    trainer.train()
+    trainer.train(
+        resume_from_checkpoint=training_args.resume
+    )
 
 if __name__ == "__main__":
     main()
