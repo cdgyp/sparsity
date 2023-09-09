@@ -26,6 +26,7 @@ import os
 import sys
 import time
 import warnings
+import torch
 from dataclasses import asdict, dataclass, field
 
 # You can also adapt this script on your own masked language modeling task. Pointers for this are left as comments.
@@ -34,6 +35,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Dict, List, Optional
 from torch import nn
+from torch import distributed as dist
 
 # import flax
 # import jax
@@ -61,10 +63,18 @@ from transformers import (
     is_tensorboard_available,
     set_seed,
     Seq2SeqTrainer,
-    Seq2SeqTrainingArguments
+    Seq2SeqTrainingArguments,
+    AdamW, Adafactor,
+    get_linear_schedule_with_warmup,
+    enable_full_determinism
 )
 from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
+from transformers.models.t5 import T5LayerFF, DenseActDense
 from transformers.utils import send_example_telemetry
+
+from ...modules.sparsify import Sparsify
+from ...modules.robustness import DoublyBiased
+from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
 
 
 MODEL_CONFIG_CLASSES = list(FLAX_MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -73,6 +83,7 @@ MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 @dataclass
 class TrainingArguments:
+    title: str = field()
     output_dir: str = field(
         metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
     )
@@ -93,7 +104,10 @@ class TrainingArguments:
     per_device_eval_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
     )
-    max_steps: float = field(default=100000, metatdat={"help": 'Default value is the same as T5 training in "The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers".'})
+    gradient_accumulated_steps: int = field(
+        default=1
+    )
+    max_steps: float = field(default=100000, metadata={"help": 'Default value is the same as T5 training in "The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers".'})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
     adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
@@ -144,6 +158,7 @@ class ModelArguments:
     db_mlp: bool = field(
         default=False,
     )
+    zeroth_bias_clipping : float = field(default=0.1)
     jsrelu: bool = field(
         default=False,
     )
@@ -151,16 +166,20 @@ class ModelArguments:
         default=False,
     )
 
-    no_affine: bool = field(
+    restricted_affine: bool = field(
         default=False,
         metadata={
             "help": (
-                "Turn off affine parameters in LayerNorm layers. Used in companion with `db_mlp`"
+                "Turn off bias parameters in LayerNorm layers and force scaling parameters >= 1"
             )
         }
     )
+
     magic_synapse: bool = field(
         default=False
+    )
+    magic_synapse_rho: float = field(
+        default=0.1
     )
     
 
@@ -512,6 +531,106 @@ def write_eval_metric(summary_writer, eval_metrics, step):
     for metric_name, value in eval_metrics.items():
         summary_writer.scalar(f"eval_{metric_name}", value, step)
 
+class T5Sparsify(Sparsify):
+    def is_MLP(self, name: str, module: torch.nn.Module):
+        return isinstance(module, T5LayerFF)
+    def wrap_MLP(self, name: str, model: torch.nn.Module, module: T5LayerFF, clipping, shape):
+        db_mlp = DoublyBiased(module.DenseReluDense, clipping=clipping, shape=shape, layer_norm=module.layer_norm)
+        setattr(module, 'DenseReluDense', db_mlp)
+        return model
+
+    def replace_activations(self, model: torch.nn.Module, jsrelu):
+        for name, module in model.named_children():
+            if isinstance(module, DenseActDense):
+                if jsrelu:
+                    setattr(model, 'act', ActivationPosition(JumpingSquaredReLU()))
+                else:
+                    setattr(model, 'act', ActivationPosition(CustomizedReLU()))
+                
+                self.activations.append(name)
+            else:
+                self.replace_activations(module, jsrelu=jsrelu)
+        return model
+
+    def magic_synapse_filter(self, name: str, module: torch.nn.Module):
+        return '.DenseReluDense.' in name and '.wi' in name
+
+def get_model(config, tokenizer, model_args: ModelArguments, training_args: TrainingArguments, inputs_length, targets_length):
+    
+    if model_args.model_name_or_path:
+        T5 = T5ForConditionalGeneration.from_pretrained(
+            model_args.model_name_or_path,
+            config=config,
+            torch_dtype=getattr(torch, model_args.dtype),
+            token=model_args.token,
+        )
+    else:
+        config.vocab_size = len(tokenizer)
+        T5 = T5ForConditionalGeneration(
+            config,
+            torch_dtype=getattr(torch, model_args.dtype),
+        )
+
+    model, writer, output_dir = T5Sparsify()(
+        'T5', training_args.title,
+        T5,
+        db_mlp=model_args.db_mlp,
+        jsrelu=model_args.jsrelu,
+        magic_synapse=model_args.magic_synapse,
+        restricted_affine=model_args.restricted_affine,
+        zeroth_bias_clipping=model_args.zeroth_bias_clipping,
+        db_mlp_shape=[max(inputs_length, targets_length), T5.config.d_model],
+        rho=model_args.magic_synapse_rho,
+        log_per_step=training_args.logging_steps,
+        steps=None,
+        start_epoch=0,
+        resume=training_args.resume,
+    )
+    training_args.output_dir = output_dir
+    return model, writer
+    
+
+    
+
+def get_optimizer_params(model: nn.Module, weight_decay: float):
+    """
+
+    by ChatGPT
+
+    Prepares optimizer parameters by excluding LayerNorm's parameters from weight decay.
+    
+    Args:
+    - model (nn.Module): The model for which parameters are prepared.
+    - weight_decay (float): The weight decay value.
+    
+    Returns:
+    - List[Union[dict, nn.Parameter]]: List containing parameter groups.
+    """
+
+    no_decay = ["bias", "LayerNorm.weight"]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+    ]
+
+    return optimizer_grouped_parameters
+
+def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArguments):
+    param_groups = get_optimizer_params(model, training_args.weight_decay)
+
+    if training_args.adafactor:
+        optimizer = Adafactor(param_groups, lr=training_args.learning_rate)
+    else:
+        optimizer = AdamW(param_groups, lr=training_args.learning_rate)
+    
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=training_args.warmup_steps, num_training_steps=training_args.max_steps)
+    return optimizer, scheduler
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -534,7 +653,9 @@ def main():
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_t5_mlm", model_args, data_args, framework="flax")
+    # send_example_telemetry("run_t5_mlm", model_args, data_args, framework="flax")
+
+    enable_full_determinism(training_args.seed + dist.get_rank())
 
     if (
         os.path.exists(training_args.output_dir)
@@ -559,9 +680,6 @@ def main():
 
     # Set the verbosity to info of the Transformers logger (on main process only):
     logger.info(f"Training/evaluation parameters {training_args}")
-
-    # Set seed before initializing model.
-    set_seed(training_args.seed)
 
     # Handle the repository creation
     if training_args.push_to_hub:
@@ -680,6 +798,7 @@ def main():
             cache_dir=model_args.cache_dir,
             vocab_size=len(tokenizer),
             token=model_args.token,
+
         )
     elif model_args.model_name_or_path:
         config = T5Config.from_pretrained(
@@ -752,43 +871,7 @@ def main():
         load_from_cache_file=not data_args.overwrite_cache,
     )
 
-    # Enable tensorboard only on the master node
-    has_tensorboard = is_tensorboard_available()
-    if has_tensorboard and jax.process_index() == 0:
-        try:
-            from tensorboardX import SummaryWriter
-
-            summary_writer = SummaryWriter(log_dir=Path(training_args.output_dir))
-        except ImportError as ie:
-            has_tensorboard = False
-            logger.warning(
-                f"Unable to display metrics through TensorBoard because some package are not installed: {ie}"
-            )
-    else:
-        logger.warning(
-            "Unable to display metrics through TensorBoard because the package is not installed: "
-            "Please run pip install tensorboard to enable."
-        )
-
-    # Initialize our training
-    rng = jax.random.PRNGKey(training_args.seed)
-    dropout_rngs = jax.random.split(rng, jax.local_device_count())
-
-    if model_args.model_name_or_path:
-        model = T5ForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            config=config,
-            seed=training_args.seed,
-            dtype=getattr(jnp, model_args.dtype),
-            token=model_args.token,
-        )
-    else:
-        config.vocab_size = len(tokenizer)
-        model = T5ForConditionalGeneration(
-            config,
-            seed=training_args.seed,
-            dtype=getattr(jnp, model_args.dtype),
-        )
+    model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
 
     # Data collator
     # This one will take care of randomly masking the tokens.
@@ -804,61 +887,16 @@ def main():
 
     # Store some constant
     num_epochs = int(training_args.num_train_epochs)
-    train_batch_size = int(training_args.per_device_train_batch_size) * jax.device_count()
+    train_batch_size = int(training_args.per_device_train_batch_size) * torch.cuda.device_count()
     per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
-    eval_batch_size = per_device_eval_batch_size * jax.device_count()
+    eval_batch_size = per_device_eval_batch_size * torch.cuda.device_count()
 
     num_train_steps = len(tokenized_datasets["train"]) // train_batch_size * num_epochs
 
-    num_of_hosts = jax.process_count()
-    current_host_idx = jax.process_index()
+    # num_of_hosts = jax.process_count()
+    # current_host_idx = jax.process_index()
 
-    # Create learning rate schedule
-    warmup_fn = optax.linear_schedule(
-        init_value=0.0, end_value=training_args.learning_rate, transition_steps=training_args.warmup_steps
-    )
-    decay_fn = optax.linear_schedule(
-        init_value=training_args.learning_rate,
-        end_value=0,
-        transition_steps=num_train_steps - training_args.warmup_steps,
-    )
-    linear_decay_lr_schedule_fn = optax.join_schedules(
-        schedules=[warmup_fn, decay_fn], boundaries=[training_args.warmup_steps]
-    )
-
-    def turn_off_affine_parameters(model: nn.Module):
-        for m in model.modules():
-            if isinstance(m, nn.LayerNorm):
-                m.elementwise_affine = False
-                if m.weight is not None:
-                    del m._parameters['weight']
-                    m.register_parameter('weight', None)
-                if m.bias is not None:
-                    del m._parameters['bias']
-                    m.register_parameter('bias', None)
-        return model
-    
-    if model_args.no_affine:
-        model = turn_off_affine_parameters(model)
-    else:
-        # We use Optax's "masking" functionality to not apply weight decay
-        # to bias and LayerNorm scale parameters. decay_mask_fn returns a
-        # mask boolean with the same structure as the parameters.
-        # The mask is True for parameters that should be decayed.
-        def decay_mask_fn(params):
-            flat_params = traverse_util.flatten_dict(params)
-            # find out all LayerNorm parameters
-            layer_norm_candidates = ["layernorm", "layer_norm", "ln"]
-            layer_norm_named_params = {
-                layer[-2:]
-                for layer_norm_name in layer_norm_candidates
-                for layer in flat_params.keys()
-                if layer_norm_name in "".join(layer).lower()
-            }
-            flat_mask = {path: (path[-1] != "bias" and path[-2:] not in layer_norm_named_params) for path in flat_params}
-            return traverse_util.unflatten_dict(flat_mask)
-        TODO
-
+    optimizer_scheduler = get_optimizer_scheduler(model, training_args)
 
 
     trainer_argument = Seq2SeqTrainingArguments(
@@ -870,17 +908,16 @@ def main():
         evaluation_strategy="steps",
         per_device_eval_batch_size=per_device_eval_batch_size,
         per_device_train_batch_size=training_args.per_device_train_batch_size,
-        gradient_accumulation_steps=TODO,
+        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
         learning_rate=training_args.learning_rate,
         weight_decay=training_args.weight_decay,
         **{key: value for key, value in training_args.to_dict().items() if 'adam' in key},
         max_grad_norm=1,
         num_train_epochs=training_args.num_train_epochs,
-        max_steps=training_args.max_steps,
-        lr_scheduler_type=TODO,
-        warmup_ratio=TODO,
-        warmup_steps=training_args.warmup_steps,
-        optim="adafactor" if training_args.adafactor else "adamw_torch",
+        max_steps=num_train_steps,
+        lr_scheduler_type=None,
+        warmup_ratio=None,
+        warmup_steps=None,
     )
 
     trainer = Seq2SeqTrainer(
@@ -889,7 +926,12 @@ def main():
         data_collator=data_collator,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
+        optimizers=optimizer_scheduler,
     )
+
+
+
+    trainer.train()
 
 if __name__ == "__main__":
     main()

@@ -4,10 +4,9 @@ from torch import nn
 from codes.base.base import BaseModule, Plugin
 from ..base import BaseModule, Plugin, ModuleReference
 
-class ImplicitAdversarialSample(nn.Module):
+class ZerothBias(nn.Module):
     def __init__(self, clipping: float=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
-        """Zeroth Bias
-
+        """
         :param float clipping: absolute maximum magnitude of entries; but when `layer_norm` is not None, this clipping become relative to the magnitude of entries in `layer_norm`'s scaling factor. Defaults to None meaning no upperbound
         :param shape: shape of feature map of **individual** samples, defaults to None meaning automatic adaptation at the first sample
         :param nn.LayerNorm layer_norm: the `LayerNorm` proceeding the zeroth bias, defaults to None
@@ -22,23 +21,38 @@ class ImplicitAdversarialSample(nn.Module):
     def forward(self, x: torch.Tensor):
         if self.biases is None:
             self.biases = nn.Parameter(torch.zeros(x.shape[1:], device=x.device))
-        return x + self.biases
+        return x + self.biases[..., :x.shape[1], :]
     def clip(self):
         if self.clipping is not None and self.biases is not None:
             with torch.no_grad():
                 if self.layer_norm is not None:
-                    absolute_clipping = self.clipping * (self.layer_norm.weight.abs().unsqaueeze(dim=-2) if hasattr(self.layer_norm, 'weight') and self.layer_norm.weight is not None else 1)
+                    absolute_clipping = self.clipping * (self.layer_norm.weight.abs().unsqueeze(dim=-2) if hasattr(self.layer_norm, 'weight') and self.layer_norm.weight is not None else 1)
                 else:
                     absolute_clipping = self.clipping
                 min_tensor, max_tensor = -absolute_clipping, absolute_clipping
                 self.biases.copy_(torch.maximum(min_tensor, torch.minimum(self.biases, max_tensor)))
 
-class WrappedImplicitAdversarialSample(BaseModule, ImplicitAdversarialSample):
+class DoublyBiased(nn.Module):
+    def __init__(self, linear: nn.Linear=None, clipping: float=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
+        """
+        :param float clipping: absolute maximum magnitude of entries; but when `layer_norm` is not None, this clipping become relative to the magnitude of entries in `layer_norm`'s scaling factor. Defaults to None meaning no upperbound
+        :param shape: shape of feature map of **individual** samples, defaults to None meaning automatic adaptation at the first sample
+        :param nn.LayerNorm layer_norm: the `LayerNorm` proceeding the zeroth bias, defaults to None
+        """
+        super().__init__()
+        self.linear = linear
+        self.zeroth_bias = ZerothBias(clipping=clipping, shape=shape, layer_norm=layer_norm)
+    def forward(self, x: torch.Tensor):
+        y = self.linear(x)
+        z = self.zeroth_bias(y)
+        return z
+
+class WrappedImplicitAdversarialSample(BaseModule, ZerothBias):
     def __init__(self, clipping=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
         BaseModule.__init__(self)
-        ImplicitAdversarialSample.__init__(self, clipping=clipping, shape=shape, layer_norm=layer_norm)
+        ZerothBias.__init__(self, clipping=clipping, shape=shape, layer_norm=layer_norm)
     def forward(self, x: torch.Tensor):
-        res = ImplicitAdversarialSample.forward(self, x)
+        res = ZerothBias.forward(self, x)
         self.losses.observe(self.biases.abs().mean(), 'implicit_adversarial_samples')
         return res
 

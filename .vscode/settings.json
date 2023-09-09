@@ -1,3 +1,6 @@
 {
-    "typst-lsp.exportPdf": "onType"
+    "typst-lsp.exportPdf": "onType",
+    "cSpell.words": [
+        "jsrelu"
+    ]
 }

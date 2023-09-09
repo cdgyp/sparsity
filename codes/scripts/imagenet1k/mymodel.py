@@ -2,65 +2,52 @@ import torch
 import os
 from functools import partial
 from torch.utils.data import DataLoader
-def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1):
-    from ...base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
-    from ...modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity
-    from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
-    from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
-    from ...modules.robustness import ImplicitAdversarialSamplePlugin, RestrictAffinePlugin
-    from ...modules.magic import MagicSynapseHook
+
+from ...modules.sparsify import Sparsify
+from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, EncoderBlock
+from ...modules.robustness import DoublyBiased
+
+
+class ImageNet1kSparsify(Sparsify):
+    def is_MLP(self, name: str, module: torch.nn.Module):
+        return isinstance(module, EncoderBlock)
+    def wrap_MLP(self, name: str, model: torch.nn.Module, module: EncoderBlock, clipping, shape):
+        db_mlp = DoublyBiased(module.mlp, clipping=clipping, shape=shape, layer_norm=module.ln_2)
+        setattr(module, 'mlp', db_mlp)
+        return model
+    def magic_synapse_filter(self, name: str, module: torch.nn.Module):
+        return '.mlp.' in name
+
+def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1):
     sparsified = (model_type == 'sparsified')
-    if args.resume is not None and len(args.resume) > 0:
-        assert 'save' in args.resume, args.resume
-        dir = args.resume[:args.resume.find('save')]
-    else:
-        dir = 'imagenet1k/' + args.title + '/' + f'{(model_type)}'
     
     if sparsified:
-        args.no_affine=True
+        args.restricted_affine=True
 
-    writer, _ = new_experiment(dir, None, dir_to_runs='runs', resume=args.resume is not None and len(args.resume) > 0)
-
-    if sparsified:
-        default_activation_layer = JumpingSquaredReLU
-    else:
-        default_activation_layer = CustomizedReLU
-    MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
     vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
         'num_classes': 1000,
         'rezero': False,
         'implicit_adversarial_samples': sparsified,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
-    if args.magic_synapse:
-        vit, _ = MagicSynapseHook.hook_on(vit)
     
-    model = Model(
-        Wrapper(
-            vit
-        ),
-        # ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
-        # GradientNoisePlugin(log_per_step=args.log_per_step),
-        # SimilarityPlugin(log_per_step=args.log_per_step),
-        # ParameterChangePlugin(log_per_step=args.log_per_step),
-        RestrictAffinePlugin() if args.restricted_affine else None,
-        ActivationDistributionPlugin(12, log_per_step=args.log_per_step),
-        ImplicitAdversarialSamplePlugin(args.implicit_adversarial_samples_clipping),
-        DiagonalityPlugin(12, log_per_step=args.log_per_step),
-        # SpectralObservationPlugin(12, log_per_step=args.log_per_step)
-        EffectiveGradientSparsity(12, log_per_step=args.log_per_step),
-    ).to(args.device)
-
-    model.iteration = epoch_size * start_epoch
-    model.epoch = start_epoch
-    model.losses = LossManager(writer=writer)
-    # start_tensorboard_server(writer.log_dir)
-    args.output_dir = os.path.join(writer.logdir, 'save')
-
-    if sparsified:
-        # make parameters of dynamic modules of implicit adversarial samples ready
-        with torch.no_grad():
-            X, Y = next(iter(dataloader))
-            pred = model(X.to(args.device)[:args.physical_batch_size])
+    model, _, output_dir = ImageNet1kSparsify()('imagenet1k', args.title + '/' + model_type,
+            vit,
+            sparsified,
+            sparsified,
+            args.magic_synapse,
+            args.restricted_affine,
+            args.implicit_adversarial_samples_clipping,
+            rho=args.magic_synapse_rho,
+            log_per_step=args.rho_per_step,
+            device=args.device,
+            epoch_size=epoch_size,
+            start_epoch=start_epoch,
+            resume=args.resume,
+            dataloader=dataloader,
+            physical_batch_size=args.physical_batch_size
+        )
+    
+    args.output_dir = output_dir
 
     return model

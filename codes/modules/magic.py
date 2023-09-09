@@ -27,6 +27,18 @@ class MagicSynapse(nn.Module):
         if output is None:
             output = module(input)
         return self.perturb(module, input, output)
+    def _default_filter(*args, **kwargs):
+        return True
+    def plug_in(model: nn.Module, rho: float=0.1, filter=None):
+        print("MagicSynapse: plugging in")
+        for name, module in model.named_children():
+            module = MagicSynapse.replace(module, rho=rho)
+            if isinstance(module, nn.Linear) and (filter is None or filter(name, module)):
+                setattr(model, name, MagicSynapse(rho=rho, linear=module))
+                print(f'\t\t {name}')
+                count += 1
+        print("MagicSynapse: totally {count} modules are perturbed")
+        return model
 
 
 class MagicSynapseHook(InputHook):
@@ -36,9 +48,17 @@ class MagicSynapseHook(InputHook):
     def __call__(self, module, input, output=None):
         return self.magic_synapse(input, output, module)
     def hook_on(model: nn.Module, rho: float=0.1):
+        """
+            Note `torch.compile()` in current versions does **not** support hooks. So use`MagicSynapse.plug_in()` if the model will be compiled
+        """
         handles: 'list[torch.utils.hooks.RemovableHandle]' = []
-        for m in model.modules():
+        count = 0
+        for name, m in model.named_modules():
             if isinstance(m, nn.Linear):
                 h = m.register_forward_hook(MagicSynapseHook(rho))
                 handles.append(h)
+                print(f'\t\t {name}')
+                count += 1
+        print(MagicSynapse.__class__, 'replace {count} Linear layers')
         return model, handles
+    
