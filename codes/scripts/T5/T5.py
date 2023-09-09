@@ -130,6 +130,8 @@ class TrainingArguments:
     
     resume:str = field(default=None, metadata="path to the checkpoint to be resumed")
 
+    compile: bool = field(default=False, metadata="whether to use `torch.compile`. `torch` above 2.0 is required. ")
+
     def __post_init__(self):
         if self.output_dir is not None:
             self.output_dir = os.path.expanduser(self.output_dir)
@@ -960,7 +962,11 @@ def main():
         compute_metrics=metric.compute_metrics,
     )
 
-    trainer.train(
+    if training_args.compile:
+        train = torch.compile(trainer.train, mode='reduce-overhead')
+    else:
+        train = trainer.train
+    train(
         resume_from_checkpoint=training_args.resume
     )
 

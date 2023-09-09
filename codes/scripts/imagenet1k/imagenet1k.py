@@ -615,10 +615,14 @@ def get_args_parser(add_help=True):
     parser.add_argument("--max-iteration", type=int, default=None, help="maximum number of iterations, only used in profiling")
     parser.add_argument("--restricted-affine", action='store_true', help="whether to force off bias and force scaling factors >=1 in LayerNorm layers.")
     parser.add_argument("--magic-synapse", action='store_true')
+    parser.add_argument("--compile", action='store_true')
     return parser
 
 
 if __name__ == "__main__":
     args = get_args_parser().parse_args()
-    # main_opt = torch.compile(main, mode='reduce-overhead')
+    if args.compile:
+        main = torch.compile(main, mode='reduce-overhead')
+    else:
+        main = main
     main(args)
