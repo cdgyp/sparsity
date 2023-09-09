@@ -1,15 +1,24 @@
 import torch
 from torch import nn
+
+from codes.base.base import BaseModule, Plugin
 from ..base import BaseModule, Plugin, ModuleReference
 
 class ImplicitAdversarialSample(nn.Module):
-    def __init__(self, clipping=None, shape=None) -> None:
+    def __init__(self, clipping: float=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
+        """Zeroth Bias
+
+        :param float clipping: absolute maximum magnitude of entries; but when `layer_norm` is not None, this clipping become relative to the magnitude of entries in `layer_norm`'s scaling factor. Defaults to None meaning no upperbound
+        :param shape: shape of feature map of **individual** samples, defaults to None meaning automatic adaptation at the first sample
+        :param nn.LayerNorm layer_norm: the `LayerNorm` proceeding the zeroth bias, defaults to None
+        """
         super().__init__()
         if shape is not None:
             self.biases = nn.Parameter(torch.zeros(shape), requires_grad=True)
         else:
             self.biases: torch.Tensor = None
         self.clipping = abs(clipping) if clipping is not None else clipping
+        self.layer_norm = layer_norm
     def forward(self, x: torch.Tensor):
         if self.biases is None:
             self.biases = nn.Parameter(torch.zeros(x.shape[1:], device=x.device))
@@ -17,13 +26,17 @@ class ImplicitAdversarialSample(nn.Module):
     def clip(self):
         if self.clipping is not None and self.biases is not None:
             with torch.no_grad():
-                self.biases.clamp_(min=-self.clipping, max=self.clipping)
+                if self.layer_norm is not None:
+                    absolute_clipping = self.clipping * (self.layer_norm.weight.abs().unsqaueeze(dim=-2) if hasattr(self.layer_norm, 'weight') and self.layer_norm.weight is not None else 1)
+                else:
+                    absolute_clipping = self.clipping
+                min_tensor, max_tensor = -absolute_clipping, absolute_clipping
+                self.biases.copy_(torch.maximum(min_tensor, torch.minimum(self.biases, max_tensor)))
 
 class WrappedImplicitAdversarialSample(BaseModule, ImplicitAdversarialSample):
-    def __init__(self, clipping=None, shape=None) -> None:
+    def __init__(self, clipping=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
         BaseModule.__init__(self)
-        ImplicitAdversarialSample.__init__(self, clipping=clipping, shape=shape)
-        #self.inner = ImplicitAdversarialSample(clipping=clipping, shape=shape)
+        ImplicitAdversarialSample.__init__(self, clipping=clipping, shape=shape, layer_norm=layer_norm)
     def forward(self, x: torch.Tensor):
         res = ImplicitAdversarialSample.forward(self, x)
         self.losses.observe(self.biases.abs().mean(), 'implicit_adversarial_samples')
@@ -46,3 +59,16 @@ class ImplicitAdversarialSamplePlugin(Plugin):
         self._clip()
     def after_backward(self):
         self._clip()
+
+class RestrictAffinePlugin(Plugin):
+    def register(self, main: BaseModule, plugins: list[Plugin]):
+        self.main = ModuleReference(main)
+        for m in self.main.modules():
+            if isinstance(m, nn.LayerNorm):
+                del m._parameters['bias']
+                m.register_parameter('bias', None)
+    def after_backward(self):
+        for m in self.main.modules():
+            if isinstance(m, nn.LayerNorm) and hasattr(m, 'weight') and m is not None:
+                m.weight.clamp_(min=1)
+        

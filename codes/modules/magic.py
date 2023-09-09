@@ -41,4 +41,4 @@ class MagicSynapseHook(InputHook):
             if isinstance(m, nn.Linear):
                 h = m.register_forward_hook(MagicSynapseHook(rho))
                 handles.append(h)
-        return handles
+        return model, handles

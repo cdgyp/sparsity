@@ -613,7 +613,8 @@ def get_args_parser(add_help=True):
     parser.add_argument("--dont-resume-lr-schedulers", action="store_true")
     parser.add_argument("--warmup_phase", type=float, default=1.0, help="length relative to 2 Pi, indicating how many epochs are under warmup")
     parser.add_argument("--max-iteration", type=int, default=None, help="maximum number of iterations, only used in profiling")
-    parser.add_argument("--no-affine", action='store_true', help="where to force off affine parameters in LayerNorm layers. When model is sparsified, the affine parameters are automatically turned off")
+    parser.add_argument("--restricted-affine", action='store_true', help="whether to force off bias and force scaling factors >=1 in LayerNorm layers.")
+    parser.add_argument("--magic-synapse", action='store_true')
     return parser
 
 

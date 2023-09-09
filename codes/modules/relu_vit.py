@@ -123,14 +123,13 @@ class EncoderBlock(nn.Module):
         self.ln_1 = norm_layer(hidden_dim)
         self.self_attention = nn.MultiheadAttention(hidden_dim, num_heads, dropout=attention_dropout, batch_first=True)
         self.dropout = nn.Dropout(dropout)
+        self.ln_2 = norm_layer(hidden_dim)
 
         if implicit_adversarial_samples:
-            self.implicit_adversarial_samples = WrappedImplicitAdversarialSample()
+            self.implicit_adversarial_samples = WrappedImplicitAdversarialSample(layer_norm=self.ln_2)
         else:
             self.implicit_adversarial_samples = None
-
         # MLP block
-        self.ln_2 = norm_layer(hidden_dim)
         self.mlp = MLPBlock(hidden_dim, mlp_dim, dropout)
         self.rezero = rezero
         if self.rezero:

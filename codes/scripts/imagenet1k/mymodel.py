@@ -7,7 +7,8 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
     from ...modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity
     from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
     from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
-    from ...modules.robustness import ImplicitAdversarialSamplePlugin
+    from ...modules.robustness import ImplicitAdversarialSamplePlugin, RestrictAffinePlugin
+    from ...modules.magic import MagicSynapseHook
     sparsified = (model_type == 'sparsified')
     if args.resume is not None and len(args.resume) > 0:
         assert 'save' in args.resume, args.resume
@@ -25,19 +26,24 @@ def get_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, 
     else:
         default_activation_layer = CustomizedReLU
     MLPBlock.default_activation_layer = lambda: ActivationPosition(default_activation_layer())
+    vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
+        'num_classes': 1000,
+        'rezero': False,
+        'implicit_adversarial_samples': sparsified,
+        'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
+    })
+    if args.magic_synapse:
+        vit, _ = MagicSynapseHook.hook_on(vit)
+    
     model = Model(
         Wrapper(
-            relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
-                'num_classes': 1000,
-                'rezero': False,
-                'implicit_adversarial_samples': sparsified,
-                'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6, elementwise_affine=not args.no_affine)
-            })
+            vit
         ),
         # ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
         # GradientNoisePlugin(log_per_step=args.log_per_step),
         # SimilarityPlugin(log_per_step=args.log_per_step),
         # ParameterChangePlugin(log_per_step=args.log_per_step),
+        RestrictAffinePlugin() if args.restricted_affine else None,
         ActivationDistributionPlugin(12, log_per_step=args.log_per_step),
         ImplicitAdversarialSamplePlugin(args.implicit_adversarial_samples_clipping),
         DiagonalityPlugin(12, log_per_step=args.log_per_step),
