@@ -3,7 +3,7 @@ import torch
 from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
 from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity
 from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
-from .robustness import ImplicitAdversarialSamplePlugin, RestrictAffinePlugin, DoublyBiased
+from .robustness import RestrictAffinePlugin, DoublyBiased, ZerothBiasPlugin
 from .magic import MagicSynapse
 
 class Sparsify:
@@ -63,8 +63,10 @@ class Sparsify:
             restricted_affine = db_mlp
 
         if resume is not None and len(resume) > 0:
-            assert 'save' in resume, resume
-            dir = resume[:resume.find('save')]
+            if 'save' in resume:
+                dir = resume[:resume.find('save')]
+            else:
+                dir = resume
         else:
             dir = name + '/' + title + '/'
 
@@ -94,7 +96,7 @@ class Sparsify:
             # ParameterChangePlugin(log_per_step=args.log_per_step),
             RestrictAffinePlugin() if restricted_affine else None,
             ActivationDistributionPlugin(12, log_per_step),
-            ImplicitAdversarialSamplePlugin(zeroth_bias_clipping) if db_mlp else None,
+            ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
             DiagonalityPlugin(12, log_per_step=log_per_step),
             # SpectralObservationPlugin(12, log_per_step=args.log_per_step)
             EffectiveGradientSparsity(12, log_per_step=log_per_step),
