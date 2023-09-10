@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from ..base import BaseModule, Plugin, ModuleReference
 
 class ZerothBias(nn.Module):
     def __init__(self, clipping: float=None, shape=None, layer_norm: nn.LayerNorm=None) -> None:
@@ -14,7 +15,7 @@ class ZerothBias(nn.Module):
         else:
             self.biases: torch.Tensor = None
         self.clipping = abs(clipping) if clipping is not None else clipping
-        self.layer_norm = layer_norm
+        self.layer_norm = ModuleReference(layer_norm)
     def forward(self, x: torch.Tensor):
         if self.biases is None:
             self.biases = nn.Parameter(torch.zeros(x.shape[1:], device=x.device))
@@ -45,8 +46,6 @@ class DoublyBiased(nn.Module):
         return z
     
 try:
-    from ..base import BaseModule, Plugin, ModuleReference
-
     class ZerothBiasPlugin(Plugin):
         def __init__(self, clipping=None, log_per_step=1) -> None:
             super().__init__()
@@ -64,23 +63,40 @@ try:
         def prepare(self, Y: torch.Tensor, labeled: torch.Tensor, D: torch.Tensor):
             self._clip()
         def after_backward(self):
-            self._clip()
-            if self.iteration % self.log_per_step == 0:
-                for m in self.main.modeuls():
-                    if isinstance(m, ZerothBias):
-                        self.losses.observe(m.biases.abs().mean(), 'zeroth_biases')
+            with torch.no_grad():
+                self._clip()
+                if self.iteration % self.log_per_step == 0:
+                    for m in self.main.modules():
+                        if isinstance(m, ZerothBias):
+                            self.losses.observe(m.biases.abs().mean(), 'zeroth_biases')
 
     class RestrictAffinePlugin(Plugin):
+        """
+            restrict the scaling factors of LayerNorm layers preceeding zeroth biases
+        """
+        def __init__(self, log_per_step=1):
+            super().__init__()
+            self.log_per_step = log_per_step
         def register(self, main: BaseModule, plugins: 'list[Plugin]'):
             self.main = ModuleReference(main)
+            count = 0
             for m in self.main.modules():
-                if isinstance(m, nn.LayerNorm):
-                    del m._parameters['bias']
-                    m.register_parameter('bias', None)
+                if isinstance(m, ZerothBias):
+                    ln: nn.LayerNorm = m.layer_norm.main
+                    del ln._parameters['bias']
+                    ln.register_parameter('bias', None)
+                    count += 1
+            print(f"RestrictedAffine: {count} LayerNorm layers are restricted")
         def after_backward(self):
-            for m in self.main.modules():
-                if isinstance(m, nn.LayerNorm) and hasattr(m, 'weight') and m is not None:
-                    m.weight.clamp_(min=1)
+            with torch.no_grad():
+                for m in self.main.modules():
+                    if not isinstance(m, ZerothBias):
+                        continue
+                    ln: nn.LayerNorm = m.layer_norm.main
+                    if hasattr(ln, 'weight') and ln.weight is not None:
+                        ln.weight.clamp_(min=1)
+                        if self.iteration % self.log_per_step == 0:
+                            self.losses.observe(ln.weight.abs().mean(), 'restricted_LayerNorm_scaling_factors')
         
 except ImportError as e:
     if e.name == '..base':

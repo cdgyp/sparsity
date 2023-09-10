@@ -11,7 +11,7 @@ from ...modules.robustness import DoublyBiased
 class ImageNet1kSparsify(Sparsify):
     def is_MLP(self, name: str, module: torch.nn.Module):
         return isinstance(module, EncoderBlock)
-    def wrap_MLP(self, name: str, model: torch.nn.Module, module: EncoderBlock, clipping, shape):
+    def wrap_MLP(self, path, name: str, model: torch.nn.Module, module: EncoderBlock, clipping, shape):
         db_mlp = DoublyBiased(module.mlp, clipping=clipping, shape=shape, layer_norm=module.ln_2)
         setattr(module, 'mlp', db_mlp)
         return model
@@ -27,7 +27,6 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
     vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
         'num_classes': 1000,
         'rezero': False,
-        'implicit_adversarial_samples': sparsified,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
     
@@ -37,9 +36,9 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
             sparsified,
             args.magic_synapse,
             args.restricted_affine,
-            args.implicit_adversarial_samples_clipping,
+            args.zeroth_bias_clipping,
             rho=args.magic_synapse_rho,
-            log_per_step=args.rho_per_step,
+            log_per_step=args.log_per_step,
             device=args.device,
             epoch_size=epoch_size,
             start_epoch=start_epoch,

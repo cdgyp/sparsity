@@ -14,8 +14,6 @@ from torchvision.models._api import register_model, Weights, WeightsEnum
 from torchvision.models._meta import _IMAGENET_CATEGORIES
 from torchvision.models._utils import _ovewrite_named_param, handle_legacy_interface
 
-from .robustness import WrappedImplicitAdversarialSample
-
 
 __all__ = [
     "VisionTransformer",
@@ -114,7 +112,6 @@ class EncoderBlock(nn.Module):
         attention_dropout: float,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         rezero=False,
-        implicit_adversarial_samples=False
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -125,10 +122,6 @@ class EncoderBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.ln_2 = norm_layer(hidden_dim)
 
-        if implicit_adversarial_samples:
-            self.implicit_adversarial_samples = WrappedImplicitAdversarialSample(layer_norm=self.ln_2)
-        else:
-            self.implicit_adversarial_samples = None
         # MLP block
         self.mlp = MLPBlock(hidden_dim, mlp_dim, dropout)
         self.rezero = rezero
@@ -152,9 +145,6 @@ class EncoderBlock(nn.Module):
         
         y = self.ln_2(x)
 
-
-        if self.implicit_adversarial_samples is not None:
-            y = self.implicit_adversarial_samples(y)
         y = self.mlp(y)
         if self.rezero:
             z = x + self.alpha_2 * y
@@ -178,7 +168,6 @@ class Encoder(nn.Module):
         attention_dropout: float,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         rezero=False,
-        implicit_adversarial_samples=False
     ):
         super().__init__()
         # Note that batch_size is on the first dim because
@@ -195,7 +184,6 @@ class Encoder(nn.Module):
                 attention_dropout,
                 norm_layer,
                 rezero=rezero,
-                implicit_adversarial_samples=implicit_adversarial_samples
             )
         self.layers = nn.Sequential(layers)
         self.ln = norm_layer(hidden_dim)
@@ -224,7 +212,6 @@ class VisionTransformer(nn.Module):
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
         conv_stem_configs: Optional[List[ConvStemConfig]] = None,
         rezero=False,
-        implicit_adversarial_samples=False
     ):
         super().__init__()
         _log_api_usage_once(self)
@@ -281,7 +268,6 @@ class VisionTransformer(nn.Module):
             attention_dropout,
             norm_layer,
             rezero=rezero,
-            implicit_adversarial_samples=implicit_adversarial_samples
         )
         self.seq_length = seq_length
 

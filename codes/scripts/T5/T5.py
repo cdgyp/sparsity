@@ -524,22 +524,23 @@ class DataCollatorForT5MLM:
 class T5Sparsify(Sparsify):
     def is_MLP(self, name: str, module: torch.nn.Module):
         return isinstance(module, T5LayerFF)
-    def wrap_MLP(self, name: str, model: torch.nn.Module, module: T5LayerFF, clipping, shape):
+    def wrap_MLP(self, path: str, name: str, model: torch.nn.Module, module: T5LayerFF, clipping, shape):
         db_mlp = DoublyBiased(module.DenseReluDense, clipping=clipping, shape=shape, layer_norm=module.layer_norm)
         setattr(module, 'DenseReluDense', db_mlp)
         return model
 
-    def replace_activations(self, model: torch.nn.Module, jsrelu):
+    def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
         for name, module in model.named_children():
+            p = '.'.join(path, name)
             if isinstance(module, DenseActDense):
                 if jsrelu:
                     setattr(model, 'act', ActivationPosition(JumpingSquaredReLU()))
                 else:
                     setattr(model, 'act', ActivationPosition(CustomizedReLU()))
                 
-                self.activations.append(name)
+                self.activations.append(p + ': ' + str(main.__class__))
             else:
-                self.replace_activations(module, jsrelu=jsrelu)
+                self.replace_activations(module, jsrelu=jsrelu, path=p)
         return model
 
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):

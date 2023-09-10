@@ -15,6 +15,9 @@ class CustomizedReLU(CustomizedActivation):
     def forward(self, x):
         return self.inner(x)
     
+    def derivative(self, x: torch.Tensor):
+        return (x >= 0).type(x.dtype, non_blocking=True)
+
     def get_habitat(self):
         return {
             "x": torch.tensor([[-1e32, 0]]),
@@ -29,7 +32,7 @@ class CustomizedGELU(CustomizedActivation):
         self.inner = nn.GELU()
     def forward(self, x):
         return self.inner(x)
-    
+
     def get_habitat(self):
         return {
             "x": torch.tensor([[-1e32, -1]]),
@@ -140,6 +143,18 @@ class _SparseJumpingSquaredReLU(torch.autograd.Function):
 
 class _JumpingSquaredReLU(torch.autograd.Function):
     @staticmethod
+    def forward(ctx, x: torch.Tensor):
+        ctx.save_for_backward(x)
+        y = x + 1
+        y.square_().div_(2).add_(-1)
+        return y * (x >= 0)
+    @staticmethod
+    def backward(ctx, grad_output):
+        x,  = ctx.saved_tensors
+        return grad_output * (x + 1) * (x >= 0)
+    
+class _NumericalControlledJumpingSquaredReLU(torch.autograd.Function):
+    @staticmethod
     def forward(ctx, x):
         nonzeros = (x > 0)
         larger = (x > 4)
@@ -161,6 +176,8 @@ class JumpingSquaredReLU(CustomizedActivation):
 
     def forward(self, x):
         return self.inner(x)
+    def derivative(self, x):
+        return (x >= 0) * (x + 1)
     
     def get_habitat(self):
         return {
@@ -200,6 +217,8 @@ class ActivationPosition(nn.Module):
         self.inner = inner
     def forward(self, x):
         return self.inner(x)
+    def derivative(self, x):
+        return self.inner.derivative(x)
     def get_habitat(self):
         return self.inner.get_habitat()
 

@@ -10,7 +10,7 @@ from ..base import new_experiment, Training, Model, Wrapper, device,  WrapperDat
 from ..modules.hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, EffectiveGradientSparsity
 from ..modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock
 from ..modules.activations import SymmetricReLU, SReLU, WeirdLeakyReLU, Shift, ActivationPosition, careful_bias_initialization, CustomizedReLU, SquaredReLU, SShaped, JumpingSquaredReLU
-from ..modules.robustness import ImplicitAdversarialSamplePlugin
+from ..modules.robustness import ZerothBiasPlugin
 from ..data.miniimagenet import MiniImagenet
 from torchvision.datasets import ImageNet, ImageFolder
 
@@ -41,7 +41,7 @@ parser.add_argument('--alpha_x', type=float, default=1)
 parser.add_argument('--alpha_y', type=float, default=1)
 parser.add_argument('--careful_bias_initialization', type=int, default=0)
 parser.add_argument('--rezero', type=int, default=0)
-parser.add_argument('--implicit_adversarial_samples', type=int, default=0)
+parser.add_argument('--zeroth-bias', type=int, default=0)
 parser.add_argument('--dataset', type=str, default='cifar10')
 parser.add_argument('--mixed_precision', action='store_true')
 
@@ -74,6 +74,8 @@ elif 'jumping' in args.activation_layer:
         default_activation_layer = lambda: SShaped(JumpingSquaredReLU(), args.half_interval)
 else:
     raise NotImplemented()
+
+raise NotImplemented()
 
 MLPBlock.default_activation_layer = lambda: ActivationPosition(Shift(default_activation_layer(), shift_x=args.shift_x, shift_y=args.shift_y, alpha_x=args.alpha_x, alpha_y=args.alpha_y))
 
@@ -122,12 +124,11 @@ vit = Model(
             'dropout': args.dropout,
             'num_classes': args.num_classes if not args.pretrained else 1000,
             'rezero': bool(args.rezero) if not args.pretrained else False,
-            'implicit_adversarial_samples': args.implicit_adversarial_samples
         })
     ),
     ERM(),
     ActivationDistributionPlugin(12, log_per_step=args.log_per_step),
-    ImplicitAdversarialSamplePlugin(1.0),
+    ZerothBiasPlugin(0.1, log_per_step=args.log_per_step) if args.zeroth_bias else None,
     DiagonalityPlugin(12, log_per_step=args.log_per_step),
     # SpectralObservationPlugin(12, log_per_step=args.log_per_step)
     EffectiveGradientSparsity(12, log_per_step=args.log_per_step),

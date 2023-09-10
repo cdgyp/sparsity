@@ -564,7 +564,7 @@ class DiagonalityPlugin(MkkTPlugin):
     def do_logs(self):
         layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
-        for i, (mlp, h) in enumerate(zip(layers[:-1], self.hooks[:-1])):
+        for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
             assert isinstance(mlp[0], torch.nn.Linear) or isinstance(mlp[0], MagicSynapse), mlp[0].__class__
             m = mlp[0] if isinstance(mlp[0], torch.nn.Linear) else mlp[0].linear
             key = m.weight
@@ -589,6 +589,21 @@ class DiagonalityPlugin(MkkTPlugin):
                     assert sum_diagonals.shape == sum_nondiagonals.shape
                     assert len(sum_diagonals.shape) in [1, 2], sum_diagonals.shape
                     self.single_log(name, p, i, sum_diagonals, sum_nondiagonals)
+
+class SpectralIncreasePlugin(MkkTPlugin):
+    def do_logs(self):
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
+        assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
+        
+        for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+            assert isinstance(mlp[0], torch.nn.Linear) or isinstance(mlp[0], MagicSynapse), mlp[0].__class__
+            m = mlp[0] if isinstance(mlp[0], torch.nn.Linear) else mlp[0].linear
+            key = m.weight
+            g = h.gradients
+
+            self.losses.observe(key.square().sum(), 'spectral_increase', 'kkT', i) # trace(K K^T) = || K ||_2^2
+            self.losses.observe(g.square().sum(dim=-1).mean(), 'spectral_increase', 'M', i) # trace(M) = trace(g g^T) = || g ||_2^2
+
 
 from typing import Union
 class SpectralObservationPlugin(MkkTPlugin):
@@ -650,7 +665,6 @@ class SpectralObservationPlugin(MkkTPlugin):
         layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            assert isinstance(mlp[0], torch.nn.Linear)
             g = h.gradients
 
             g2: torch.Tensor = g**2
@@ -693,13 +707,11 @@ class EffectiveGradientSparsity(MkkTPlugin):
             pre_activations = hook_a.pre_activations
             assert g.shape == pre_activations.shape, (g.shape, pre_activations.shape)
             activation_function = hook_a.module.main
-            def wrapped(x):
-                return activation_function(x).sum()
-            with torch.set_grad_enabled(True):
-                gamma = jacobian(wrapped, pre_activations)
+            gamma = activation_function.derivative(pre_activations)
             assert g.shape == gamma.shape, (g.shape, gamma.shape)
+            eta = g * gamma
             for p in [1e-9, 1e-6, 1e-3]:
                 self.losses.observe((g.abs() < (p * 1e9)).float().mean(), 'concentration_g', p, i)
-                self.losses.observe(((g * gamma).abs() < p).float().mean(), 'effective_concentration', p, i)
+                self.losses.observe((eta.abs() < p).float().mean(), 'effective_concentration', p, i)
             for p in [1, 2]:
-                self.losses.observe(((g * gamma).abs()**p).sum(dim=-1).mean(), 'effective_sparsity_norm', p, i)
+                self.losses.observe((eta.abs()**p).sum(dim=-1).mean(), 'effective_sparsity_norm', p, i)

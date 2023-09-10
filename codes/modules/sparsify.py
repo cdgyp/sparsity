@@ -1,7 +1,7 @@
 import os
 import torch
 from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
-from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity
+from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin
 from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
 from .robustness import RestrictAffinePlugin, DoublyBiased, ZerothBiasPlugin
 from .magic import MagicSynapse
@@ -11,30 +11,32 @@ class Sparsify:
         self.activations = []
         self.mlps = []
 
-    def replace_activations(self, model: torch.nn.Module, jsrelu):
+    def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
         for name, module in model.named_children():
+            p = '.'.join([path, name])
             if isinstance(module, torch.nn.ReLU):
                 if jsrelu:
                     setattr(model, name, ActivationPosition(JumpingSquaredReLU()))
                 else:
                     setattr(model, name, ActivationPosition(CustomizedReLU()))
-                self.activations.append(name)
+                self.activations.append(p + ': ' + str(module.__class__))
             else:
-                self.replace_activations(module, jsrelu=jsrelu)
+                self.replace_activations(module, jsrelu=jsrelu, path=p)
         return model
     
     def is_MLP(self, name: str, module: torch.nn.Module):
         pass
-    def wrap_MLP(self, name: str, model: torch.nn.Module, module: torch.nn.Module, clipping, shape):
+    def wrap_MLP(self, path: str, name: str, model: torch.nn.Module, module: torch.nn.Module, clipping, shape):
         pass
 
-    def replace_MLPs(self, model: torch.nn.Module, clipping=None, shape=None):
+    def replace_MLPs(self, model: torch.nn.Module, clipping=None, shape=None, path='model'):
         for name, module in model.named_children():
-            if self.is_MLP(name, module):
-                self.mlps.append(name)
-                self.wrap_MLP(name, model, module, clipping=clipping, shape=shape)
+            p = '.'.join([path, name])
+            if self.is_MLP(p, module):
+                self.wrap_MLP(path, name, model, module, clipping=clipping, shape=shape)
+                self.mlps.append(p + ': ' + str(module.__class__))
             else:
-                self.replace_MLPs(module, clipping, shape)
+                self.replace_MLPs(module, clipping, shape, p)
         return model
 
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
@@ -76,29 +78,27 @@ class Sparsify:
             print("Sparsify: replacing singly biased MLPs")
             model = self.replace_MLPs(model, zeroth_bias_clipping, db_mlp_shape)
             for m in self.mlps:
-                print(f'\t\t{m}')
+                print(f'\t{m}')
             print(f'Sparsify: {len(self.mlps)} MLP blocks replaced')
 
         print("Sparsify: replacing activation functions")
-        model = self.replace_activations(model, jsrelu)
+        model = self.replace_activations(model, jsrelu=jsrelu)
         for a in self.activations:
-            print(f'\t\t{a}')
+            print(f'\t{a}')
         print(f'Sparsify: {len(self.activations)} activations replaced')
         
         if magic_synapse:
+            print("MagicSynapse: Plugging in")
             model = MagicSynapse.plug_in(model=model, rho=rho, filter=self.magic_synapse_filter)
+            print("MagicSynapse: Finished")
 
         model = Model(
             Wrapper(model),
             # ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
-            # GradientNoisePlugin(log_per_step=args.log_per_step),
-            # SimilarityPlugin(log_per_step=args.log_per_step),
-            # ParameterChangePlugin(log_per_step=args.log_per_step),
-            RestrictAffinePlugin() if restricted_affine else None,
+            RestrictAffinePlugin(log_per_step=log_per_step) if restricted_affine else None,
             ActivationDistributionPlugin(12, log_per_step),
             ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
-            DiagonalityPlugin(12, log_per_step=log_per_step),
-            # SpectralObservationPlugin(12, log_per_step=args.log_per_step)
+            SpectralIncreasePlugin(12, log_per_step=log_per_step),
             EffectiveGradientSparsity(12, log_per_step=log_per_step),
         ).to(device)
 

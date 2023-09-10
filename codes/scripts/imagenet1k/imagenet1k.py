@@ -240,7 +240,7 @@ def load_data(traindir, valdir, args):
     return dataset, dataset_test, train_sampler, test_sampler
 
 
-from .mymodel import get_model
+from .mymodel import get_imagenet1k_model
 
 
 def main(args):
@@ -301,7 +301,7 @@ def main(args):
 
     print("Creating model")
     if args.model in ['vanilla', 'sparsified']:
-        model = get_model(args.model, data_loader, args, start_epoch=checkpoint['epoch'] + 1 if args.resume else 0, epoch_size=len(data_loader))
+        model = get_imagenet1k_model(args.model, data_loader, args, start_epoch=checkpoint['epoch'] + 1 if args.resume else 0, epoch_size=len(data_loader))
     else:
         model = torchvision.models.get_model(args.model, weights=args.weights, num_classes=num_classes)
     model.to(device)
@@ -437,47 +437,50 @@ def main(args):
             evaluate(model, criterion, data_loader_test, device=device)
         return
 
-    print("Start training")
-    with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
-        start_time = time.time()
-        for epoch in range(args.start_epoch, args.physical_epochs):
-            with torch.autograd.profiler.record_function("training"):
-                if args.distributed:
-                    train_sampler.set_epoch(epoch)
-                train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
-                if isinstance(model, Model) and args.max_iteration is not None and model.iteration >= args.max_iteration:
-                    break
-                lr_scheduler.step()
-                evaluate(model, criterion, data_loader_test, device=device)
-                if model_ema:
-                    evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
-                if args.output_dir:
-                    checkpoint = {
-                        "model": model_without_ddp.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "epoch": epoch,
-                        "args": args,
-                    }
+    def train_epochs():
+        print("Start training")
+        with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
+            start_time = time.time()
+            for epoch in range(args.start_epoch, args.physical_epochs):
+                with torch.autograd.profiler.record_function("training"):
+                    if args.distributed:
+                        train_sampler.set_epoch(epoch)
+                    train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
+                    if isinstance(model, Model) and args.max_iteration is not None and model.iteration >= args.max_iteration:
+                        break
+                    lr_scheduler.step()
+                    evaluate(model, criterion, data_loader_test, device=device)
                     if model_ema:
-                        checkpoint["model_ema"] = model_ema.state_dict()
-                    if scaler:
-                        checkpoint["scaler"] = scaler.state_dict()
-                    utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-                    utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+                        evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
+                    if args.output_dir:
+                        checkpoint = {
+                            "model": model_without_ddp.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "lr_scheduler": lr_scheduler.state_dict(),
+                            "epoch": epoch,
+                            "args": args,
+                        }
+                        if model_ema:
+                            checkpoint["model_ema"] = model_ema.state_dict()
+                        if scaler:
+                            checkpoint["scaler"] = scaler.state_dict()
+                        utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+                        utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Training time {total_time_str}")
-    if prof is not None:
-        print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print(f"Training time {total_time_str}")
+        if prof is not None:
+            print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
+    if args.compile:
+        train_epochs = torch.compile(train_epochs, mode='max-autotune')
+    train_epochs()
 
 def get_args_parser(add_help=True):
     import argparse
 
     parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
-
     parser.add_argument("--title", type=str, default="ImageNet1K")
 
     parser.add_argument("--data-path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
@@ -608,21 +611,18 @@ def get_args_parser(add_help=True):
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
     parser.add_argument("--log_per_step", type=int, default=10, help="the number of steps between two logging")
     parser.add_argument("--from-scratch", action="store_true")
-    parser.add_argument("--implicit-adversarial-samples-clipping", type=float, default=None, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
+    parser.add_argument("--zeroth-bias-clipping", type=float, default=0.1, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
     parser.add_argument("--wide", action="store_true", help="turn on wide MLP for transformers")
     parser.add_argument("--dont-resume-lr-schedulers", action="store_true")
     parser.add_argument("--warmup_phase", type=float, default=1.0, help="length relative to 2 Pi, indicating how many epochs are under warmup")
     parser.add_argument("--max-iteration", type=int, default=None, help="maximum number of iterations, only used in profiling")
     parser.add_argument("--restricted-affine", action='store_true', help="whether to force off bias and force scaling factors >=1 in LayerNorm layers.")
     parser.add_argument("--magic-synapse", action='store_true')
+    parser.add_argument("--magic-synapse-rho", type=float, default='0.1')
     parser.add_argument("--compile", action='store_true')
     return parser
 
 
 if __name__ == "__main__":
     args = get_args_parser().parse_args()
-    if args.compile:
-        main = torch.compile(main, mode='reduce-overhead')
-    else:
-        main = main
     main(args)
