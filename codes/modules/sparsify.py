@@ -105,7 +105,7 @@ class Sparsify:
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
         model.epoch = start_epoch
         model.losses = LossManager(writer=writer)
-        # start_tensorboard_server(writer.log_dir)
+        start_tensorboard_server(writer.logdir)
         output_dir = os.path.join(writer.logdir, 'save')
 
         if db_mlp and db_mlp_shape is None:

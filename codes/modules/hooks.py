@@ -695,7 +695,6 @@ class SpectralObservationPlugin(MkkTPlugin):
 
 from torch.autograd.functional import jacobian
 class EffectiveGradientSparsity(MkkTPlugin):
-
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         super().register(main, plugins)
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
