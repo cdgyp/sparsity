@@ -8,6 +8,7 @@ from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
 from .vit import ViT, FeedForward
 from .relu_vit import MLPBlock
 from .activations import CustomizedActivation, ActivationPosition
+from .magic import MagicSynapse
 
 
 class ActivationHook(Hook):
@@ -16,19 +17,23 @@ class ActivationHook(Hook):
         module_types = kwargs['module_types']
 
         res = []
-        for name, module in vit.named_modules():
+        count = 0
+        print("ActivationHook: Deploying")
+        for name1, module in vit.named_modules():
             if not isinstance(module, FeedForward) and not isinstance(module, MLPBlock):
                 continue
-            if str(depth - 1) in name:
-                continue
-            for submodule in module.modules():
+            # if str(depth - 1) in name1:
+                # continue
+            for name2, submodule in module.named_modules():
                 for type in module_types:
                     if isinstance(submodule, type):
+                        count += 1
                         h = hook_type()
                         h.hook_on(submodule)
                         res.append(h)
-                        print(f'hook {hook_type} at module {submodule} as {type}')
+                        print(f'\t{name1}.{name2}: {submodule.__class__}')
                         break
+        print(f"ActivationHook: {count} hooked")
         
         return res
 
@@ -557,11 +562,12 @@ class DiagonalityPlugin(MkkTPlugin):
 
 
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)][:-1]
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            assert isinstance(mlp[0], torch.nn.Linear)
-            key = mlp[0].weight
+            assert isinstance(mlp[0], torch.nn.Linear) or isinstance(mlp[0], MagicSynapse), mlp[0].__class__
+            m = mlp[0] if isinstance(mlp[0], torch.nn.Linear) else mlp[0].linear
+            key = m.weight
             kkT = einsum(
                 key, key,
                 'i d,   j d     ->  i j'
@@ -641,7 +647,7 @@ class SpectralObservationPlugin(MkkTPlugin):
             'combined': max_eigenvalues_kkT * max_g2 / (min_nonzero_eigenvalues_kkT * min_g2 + eps) 
         }
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)][:-1]
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
             assert isinstance(mlp[0], torch.nn.Linear)
@@ -680,7 +686,7 @@ class EffectiveGradientSparsity(MkkTPlugin):
         super().register(main, plugins)
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)][:-1]
+        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (hook_g, hook_a) in enumerate(zip(self.hooks, self.activation_hooks)):
             g = hook_g.gradients
