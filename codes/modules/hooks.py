@@ -564,7 +564,7 @@ class DiagonalityPlugin(MkkTPlugin):
     def do_logs(self):
         layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
-        for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+        for i, (mlp, h) in enumerate(zip(layers[:-1], self.hooks[:-1])):
             assert isinstance(mlp[0], torch.nn.Linear) or isinstance(mlp[0], MagicSynapse), mlp[0].__class__
             m = mlp[0] if isinstance(mlp[0], torch.nn.Linear) else mlp[0].linear
             key = m.weight
@@ -703,10 +703,3 @@ class EffectiveGradientSparsity(MkkTPlugin):
                 self.losses.observe(((g * gamma).abs() < p).float().mean(), 'effective_concentration', p, i)
             for p in [1, 2]:
                 self.losses.observe(((g * gamma).abs()**p).sum(dim=-1).mean(), 'effective_sparsity_norm', p, i)
-            
-
-
-
-
-        
-
