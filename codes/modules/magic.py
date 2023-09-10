@@ -1,42 +1,64 @@
 import torch
 from torch import nn
+from ..base import ModuleReference
 
 class MagicSynapse(nn.Module):
-    def __init__(self, rho: float=0.1, linear: nn.Linear=None) -> None:
+    def __init__(self, rho: float=0.1, linear: nn.Linear=None, layer_norm: nn.LayerNorm=None) -> None:
         """
             rho: approximately the ratio between noise std and entry norms in weight matrices
         """
         super().__init__()
         self.rho = rho
         self.linear = linear
+        self.ln: nn.LayerNorm = ModuleReference(layer_norm) if layer_norm is not None else None
+        self._cache: dict[str, torch.Tensor] = {}
+        self._cache_gaussian: dict[str, torch.Tensor] = {}
     def get_sigma(self, module: torch.nn.Linear):
         weight = module.weight
-        norm = weight.abs().mean()
-        return norm * self.rho
+        return weight.detach().abs_().mean().mul(self.rho)
+    def get_norms(self, input: torch.Tensor):
+        """
+            use pre-allocated memory when computing norms
+        """
+        device = str(input.device)
+        if device not in self._cache or self._cache[device].shape != input.shape[:-1] or self._cache[device].dtype != input.dtype:
+            self._cache[device] = torch.empty(input.shape[:-1], dtype=input.dtype, device=input.device, requires_grad=False)
+        torch.norm(input, p=2, dim=-1, out=self._cache[device])
+        return self._cache[device].unsqueeze(dim=-1)
+    def get_standard_gaussian(self, output: torch.Tensor):
+        device = str(output.device)
+        if device not in self._cache_gaussian or self._cache_gaussian[device].shape != output.shape or self._cache_gaussian[device].dtype != output.dtype:
+            self._cache_gaussian[device] = torch.empty_like(output, requires_grad=False)
+        self._cache_gaussian[device].normal_()
+        return self._cache_gaussian[device]
+    
+    def get_noises(self, input: torch.Tensor, output: torch.Tensor, module: torch.nn.Linear):
+        with torch.no_grad():
+            sigma = self.get_sigma(module)
+            norms = self.get_norms(input=input)
+            gaussians = self.get_standard_gaussian(output=output)
+            return gaussians.mul_(sigma).mul_(norms)
+        
     def perturb(self, module: nn.Linear, input: torch.Tensor, output: torch.Tensor):
         if self.rho == 0.0 or not self.training:
             return output
-        sigma = self.get_sigma(module)
-        norms = input.norm(2, dim=-1, keepdim=True)
-        gaussians = torch.randn_like(output, requires_grad=False)
-        return output + sigma * norms * gaussians
+        return output + self.get_noises(input, output, module)
+    
     def forward(self, input: torch.Tensor, output: torch.Tensor=None, module: nn.Linear=None):
         if module is None:
             module = self.linear
         if output is None:
             output = module(input)
         return self.perturb(module, input, output)
-    def _default_filter(*args, **kwargs):
-        return True
-    def plug_in(model: nn.Module, rho: float=0.1, filter=None):
-        print("MagicSynapse: plugging in")
+    
+    def plug_in(model: nn.Module, rho: float=0.1, filter=None, path='model'):
         for name, module in model.named_children():
-            module = MagicSynapse.replace(module, rho=rho)
-            if isinstance(module, nn.Linear) and (filter is None or filter(name, module)):
+            p = '.'.join([path, name])
+            if isinstance(module, nn.Linear) and (filter is None or filter(p, module)):
                 setattr(model, name, MagicSynapse(rho=rho, linear=module))
-                print(f'\t\t {name}')
-                count += 1
-        print("MagicSynapse: totally {count} modules are perturbed")
+                print(f'\t {p}')
+            else:
+                MagicSynapse.plug_in(module, rho=rho, filter=filter, path=p)
         return model
 
 try:
@@ -57,7 +79,7 @@ try:
                 if isinstance(m, nn.Linear):
                     h = m.register_forward_hook(MagicSynapseHook(rho))
                     handles.append(h)
-                    print(f'\t\t {name}')
+                    print(f'\t {name}')
                     count += 1
             print(MagicSynapse.__class__, 'replace {count} Linear layers')
             return model, handles
