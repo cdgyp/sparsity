@@ -10,6 +10,10 @@ class Sparsify:
     def __init__(self) -> None:
         self.activations = []
         self.mlps = []
+        self.mlp_types = []
+    
+    def extract_linear_layer(self, mlp) -> dict[str, torch.nn.Linear]:
+        pass
 
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
         for name, module in model.named_children():
@@ -94,12 +98,11 @@ class Sparsify:
 
         model = Model(
             Wrapper(model),
-            # ActivationObservationPlugin(p=1, depth=12, batchwise_reported=False, log_per_step=args.log_per_step, pre_activation_only=True),
             RestrictAffinePlugin(log_per_step=log_per_step) if restricted_affine else None,
-            ActivationDistributionPlugin(12, log_per_step),
+            ActivationDistributionPlugin(self.mlp_types, log_per_step),
             ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
-            SpectralIncreasePlugin(12, log_per_step=log_per_step),
-            EffectiveGradientSparsity(12, log_per_step=log_per_step),
+            SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
+            EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
         ).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 

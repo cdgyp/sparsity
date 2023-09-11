@@ -5,34 +5,36 @@ from codes.base.base import BaseModule, Plugin, ModuleReference
 from einops import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
-from .vit import ViT, FeedForward
-from .relu_vit import MLPBlock
+# from .vit import ViT, FeedForward
+# from .relu_vit import MLPBlock
 from .activations import CustomizedActivation, ActivationPosition
 from .magic import MagicSynapse
 
+def _is_instance(obj, types):
+    if len(types) == 1:
+        return isinstance(obj, types[0])
+    for t in types:
+        if isinstance(obj, t):  return True
+    return False
 
 class ActivationHook(Hook):
-    def hook_on_all(vit: ViT, depth, *args, **kwargs):
-        hook_type = kwargs['type']  if 'type'  in kwargs and kwargs['type'] is not None else ActivationHook
-        module_types = kwargs['module_types']
+    def hook_on_all(vit, mlp_types, target_module_types, type=None):
+        hook_type = type if type is not None else ActivationHook
 
         res = []
         count = 0
         print("ActivationHook: Deploying")
         for name1, module in vit.named_modules():
-            if not isinstance(module, FeedForward) and not isinstance(module, MLPBlock):
+            if _is_instance(module, mlp_types):
                 continue
-            # if str(depth - 1) in name1:
-                # continue
             for name2, submodule in module.named_modules():
-                for type in module_types:
-                    if isinstance(submodule, type):
-                        count += 1
-                        h = hook_type()
-                        h.hook_on(submodule)
-                        res.append(h)
-                        print(f'\t{name1}.{name2}: {submodule.__class__}')
-                        break
+                if _is_instance(submodule, target_module_types):
+                    count += 1
+                    h = hook_type()
+                    h.hook_on(submodule)
+                    res.append(h)
+                    print(f'\t{name1}.{name2}: {submodule.__class__}')
+                    break
         print(f"ActivationHook: {count} hooked")
         
         return res
@@ -51,8 +53,8 @@ class ActivationMapHook(ForwardHook):
         self.pre_activations = input[0]
         self.module = ModuleReference(module)
 
-    def hook_on_all(module: nn.Module, depth, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=ActivationMapHook, module_types=[ActivationPosition]))
+    def hook_on_all(module: nn.Module, mlp_types):
+        return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=ActivationMapHook)
 
 class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
@@ -64,8 +66,8 @@ class MlpGradientHook(BackwardHook):
         grad = grad_output[0].to_dense().float() if isinstance(grad_output, tuple) else grad_output.to_dense().float()
         assert isinstance(grad, torch.Tensor), grad
         self.gradients = grad
-    def hook_on_all(module: nn.Module, depth, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[FeedForward, MLPBlock]))
+    def hook_on_all(module: nn.Module, mlp_types):
+        return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook)
     def get(self):
         res = self.gradients
         self.gradients = None
@@ -216,7 +218,7 @@ class IdleRecorder(BaseModule):
         return dict()
 
 class ActivationObservationPlugin(Plugin):
-    def __init__(self, p=1, depth=12, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False):
+    def __init__(self, mlp_types, extract_linear_layers, p=1, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
         self.gradient_hooks: list[MlpGradientHook] = []
@@ -230,7 +232,8 @@ class ActivationObservationPlugin(Plugin):
         #self.samplewise_correlation_recorder = CorrelationRecorder(label='sample', beta=self.beta)
         self.samplewise_correlation_recorder = IdleRecorder()
 
-        self.depth = depth
+        self.mlp_types = mlp_types
+        self.extract_linear_layers = extract_linear_layers
 
         self.main = None
 
@@ -238,8 +241,8 @@ class ActivationObservationPlugin(Plugin):
         self.pre_activation_only = pre_activation_only
 
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
-        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
-        self.gradient_hooks = MlpGradientHook.hook_on_all(main, self.depth)
+        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
+        self.gradient_hooks = MlpGradientHook.hook_on_all(main, self.mlp_types)
         print(len(self.activation_hooks), len(self.gradient_hooks))
         self.main: BaseModule = ModuleReference(main)
     
@@ -308,19 +311,14 @@ class ActivationObservationPlugin(Plugin):
 
             grad_norm = 0
             for m in self.main.modules():
-                if isinstance(m, FeedForward) or isinstance(m, MLPBlock):
-                    layers = None 
-                    if isinstance(m, FeedForward):
-                        layers = m.net
-                    elif isinstance(m, MLPBlock):   
-                        layers = m
-                    key_linear = layers[3]
-                    assert isinstance(key_linear, nn.Linear)
+                if _is_instance(m, self.mlp_types):
+                    value_linear = self.extract_linear_layers(m)['values']
+                    assert isinstance(value_linear, nn.Linear)
 
 
-                    if key_linear.weight.grad is not None:
-                        grad_norm += (key_linear.weight.grad**2).sum()
-            self.losses.observe(grad_norm.sqrt(), 'grad norm wrt keys')
+                    if value_linear.weight.grad is not None:
+                        grad_norm += (value_linear.weight.grad**2).sum()
+            self.losses.observe(grad_norm.sqrt(), 'grad norm wrt values')
     def get_results(self):
         if self.batchwise_reported:
             return {
@@ -376,10 +374,11 @@ class GradientNoisePlugin(Plugin):
     
 
 class SimilarityPlugin(Plugin):
-    def __init__(self, log_per_step=1):
+    def __init__(self, mlp_types, log_per_step=1):
         super().__init__()
         self.log_per_step = log_per_step
         self.main = None
+        self.mlp_types = mlp_types
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
     
@@ -423,7 +422,7 @@ class SimilarityPlugin(Plugin):
         main = self.main
         mlp_index = 0
         for module in main.modules():
-            if isinstance(module, MLPBlock):
+            if _is_instance(module, self.mlp_types):
                 linears = []
                 for submodule in module.modules():
                     if isinstance(submodule, nn.Linear):
@@ -464,17 +463,17 @@ class ParameterChangePlugin(Plugin):
                 self.losses.histogram(self.initial_parameters - new_parameters, 'parameter_changes', 'absolute', bins=200)
         
 class ActivationDistributionPlugin(Plugin):
-    def __init__(self, depth_main, log_per_step=10, eps=1e-5):
+    def __init__(self, mlp_types, log_per_step=10, eps=1e-5):
         super().__init__()
         self.log_per_step = log_per_step
         self.main = None
         self.hooks: list[ActivationMapHook] = None
-        self.depth = depth_main
+        self.mlp_types = mlp_types
         self.activations = []
         self.eps = eps
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
-        self.hooks = ActivationMapHook.hook_on_all(main, self.depth)
+        self.hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
         print(len(self.hooks))
     def fall_within(self, values: torch.Tensor, ranges: torch.Tensor):
         res = torch.zeros_like(values, dtype=torch.bool)
@@ -510,19 +509,26 @@ class ActivationDistributionPlugin(Plugin):
             self.activations = []
 
 class ActivationGradientHook(MlpGradientHook):
-    def hook_on_all(module: nn.Module, depth, *args, **kwargs):
-        return ActivationHook.hook_on_all(module, depth, *args, **replace_config(kwargs, type=MlpGradientHook, module_types=[ActivationPosition]))
+    def hook_on_all(module: nn.Module, mlp_types):
+        return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=MlpGradientHook)
 
 
 class MkkTPlugin(Plugin):
-    def __init__(self, depth_main, log_per_step=10, eps=1e-5):
+    def __init__(self, mlp_types, extract_linear_layers, log_per_step=10, eps=1e-5):
         super().__init__()
         self.log_per_step = log_per_step
         self.eps = eps
-        self.depth = depth_main
+        self.mlp_types = mlp_types
+        self.extract_linear_layers = extract_linear_layers
+    def get_weight_matrix(self, mlp, which: str):
+        layer = self.extract_linear_layers(mlp)[which]
+        assert isinstance(layer, torch.nn.Linear) or isinstance(layer, MagicSynapse), (layer.__class__, which)
+        layer = layer if isinstance(layer, torch.nn.Linear) else layer.linear
+        return layer.weight
+    
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
-        self.hooks = ActivationGradientHook.hook_on_all(main, self.depth)
+        self.hooks = ActivationGradientHook.hook_on_all(main, self.mlp_types)
         print(len(self.hooks))
 
     def entrysum(self, x: torch.Tensor, M: torch.Tensor=None):
@@ -562,12 +568,10 @@ class DiagonalityPlugin(MkkTPlugin):
 
 
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
+        layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            assert isinstance(mlp[0], torch.nn.Linear) or isinstance(mlp[0], MagicSynapse), mlp[0].__class__
-            m = mlp[0] if isinstance(mlp[0], torch.nn.Linear) else mlp[0].linear
-            key = m.weight
+            key = self.get_weight_matrix(mlp, 'key')
             kkT = einsum(
                 key, key,
                 'i d,   j d     ->  i j'
@@ -592,13 +596,11 @@ class DiagonalityPlugin(MkkTPlugin):
 
 class SpectralIncreasePlugin(MkkTPlugin):
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
+        layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            assert isinstance(mlp[0], torch.nn.Linear) or isinstance(mlp[0], MagicSynapse), mlp[0].__class__
-            m = mlp[0] if isinstance(mlp[0], torch.nn.Linear) else mlp[0].linear
-            key = m.weight
+            key = self.get_weight_matrix(mlp, 'key')
             g = h.gradients
 
             self.losses.observe(key.square().sum(), 'spectral_increase', 'kkT', i) # trace(K K^T) = || K ||_2^2
@@ -662,7 +664,7 @@ class SpectralObservationPlugin(MkkTPlugin):
             'combined': max_eigenvalues_kkT * max_g2 / (min_nonzero_eigenvalues_kkT * min_g2 + eps) 
         }
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
+        layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
             g = h.gradients
@@ -697,9 +699,9 @@ from torch.autograd.functional import jacobian
 class EffectiveGradientSparsity(MkkTPlugin):
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         super().register(main, plugins)
-        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.depth)
+        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
     def do_logs(self):
-        layers = [m for m in self.main.modules() if isinstance(m, MLPBlock)]
+        layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (hook_g, hook_a) in enumerate(zip(self.hooks, self.activation_hooks)):
             g = hook_g.gradients

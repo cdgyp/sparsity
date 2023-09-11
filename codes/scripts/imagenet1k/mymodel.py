@@ -9,6 +9,17 @@ from ...modules.robustness import DoublyBiased
 
 
 class ImageNet1kSparsify(Sparsify):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mlp_types = [MLPBlock]
+    def extract_linear_layer(self, mlp: MLPBlock) -> dict[str, torch.nn.Linear]:
+        linears = {
+            'key': mlp[0],
+            'value': mlp[3]
+        }
+        assert all([isinstance(m, torch.nn.Linear) for m in linears.values()]), {key: m.__class__ for key, m in linears.items()}
+        return linears
+    
     def is_MLP(self, name: str, module: torch.nn.Module):
         return isinstance(module, EncoderBlock)
     def wrap_MLP(self, path, name: str, model: torch.nn.Module, module: EncoderBlock, clipping, shape):

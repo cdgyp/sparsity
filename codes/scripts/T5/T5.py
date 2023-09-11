@@ -522,6 +522,16 @@ class DataCollatorForT5MLM:
         return is_noise[:orig_length]
 
 class T5Sparsify(Sparsify):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mlp_types = [DenseActDense]
+
+    def extract_linear_layer(self, mlp: DenseActDense) -> dict[str, torch.nn.Linear]:
+        return {
+            'key': mlp.wi,
+            'value': mlp.wo
+        }
+    
     def is_MLP(self, name: str, module: torch.nn.Module):
         return isinstance(module, T5LayerFF)
     def wrap_MLP(self, path: str, name: str, model: torch.nn.Module, module: T5LayerFF, clipping, shape):
