@@ -12,7 +12,7 @@ class Sparsify:
         self.mlps = []
         self.mlp_types = []
     
-    def extract_linear_layer(self, mlp) -> dict[str, torch.nn.Linear]:
+    def extract_linear_layer(self, mlp) -> 'dict[str, torch.nn.Linear]':
         pass
 
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):

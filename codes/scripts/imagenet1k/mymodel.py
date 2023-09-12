@@ -12,7 +12,7 @@ class ImageNet1kSparsify(Sparsify):
     def __init__(self) -> None:
         super().__init__()
         self.mlp_types = [MLPBlock]
-    def extract_linear_layer(self, mlp: MLPBlock) -> dict[str, torch.nn.Linear]:
+    def extract_linear_layer(self, mlp: MLPBlock) -> 'dict[str, torch.nn.Linear]':
         linears = {
             'key': mlp[0],
             'value': mlp[3]

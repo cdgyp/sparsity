@@ -17,6 +17,7 @@ def main():
         if len(module_parts) > 1:
             pkg = ".".join(module_parts[:-1])
             mod = module_parts[-1]
+            print(pkg, mod)
             module = importlib.import_module(f".{mod}", package=pkg)
         else:
             module = importlib.import_module(module_path)
