@@ -7,3 +7,7 @@ pic
 data/imagenet1k256
 dumps/***
 profile*
+***/*.egg-info/*
+***/build/*
+***/dist/*
+*.so

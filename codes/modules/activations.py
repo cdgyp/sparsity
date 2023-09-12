@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 
+
 class CustomizedActivation(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -141,15 +142,18 @@ class _SparseJumpingSquaredReLU(torch.autograd.Function):
         derivative = (middle_x + 1).get_data() + larger * 5
         return grad_output * derivative
 
+import jsrelu_ext
 class _JumpingSquaredReLU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor):
+        return jsrelu_ext.forward(x)
         ctx.save_for_backward(x)
         y = x + 1
-        y.square_().div_(2).add_(-1)
+        y.square_().add_(-1).div_(2)
         return y * (x >= 0)
     @staticmethod
     def backward(ctx, grad_output):
+        return grad_output * jsrelu_ext.deriative(x)
         x,  = ctx.saved_tensors
         return grad_output * (x + 1) * (x >= 0)
     

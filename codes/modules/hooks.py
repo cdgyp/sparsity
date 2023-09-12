@@ -722,6 +722,6 @@ class EffectiveGradientSparsity(MkkTPlugin):
                 count = selected.sum()
                 self.losses.observe(sign * count, 'activation_effect', 'count', i)
 
-                sum = (eta * selected).sum()
-                self.losses.observe(sign *sum, 'activation_effect', 'sum', i)
+                sum = (eta * selected).abs_().sum()
+                self.losses.observe(sign * sum, 'activation_effect', 'sum', i)
                 self.losses.observe(sign * sum /  count, 'activation_effect', 'average', i)
