@@ -716,3 +716,12 @@ class EffectiveGradientSparsity(MkkTPlugin):
                 self.losses.observe((eta.abs() < p).float().mean(), 'effective_concentration', p, i)
             for p in [1, 2]:
                 self.losses.observe((eta.abs()**p).sum(dim=-1).mean(), 'effective_sparsity_norm', p, i)
+            
+            for sign in [+1, -1]:
+                selected = (sign * eta < 0)
+                count = selected.sum()
+                self.losses.observe(sign * count, 'activation_effect', 'count', i)
+
+                sum = (eta * selected).sum()
+                self.losses.observe(sign *sum, 'activation_effect', 'sum', i)
+                self.losses.observe(sign * sum /  count, 'activation_effect', 'average', i)
