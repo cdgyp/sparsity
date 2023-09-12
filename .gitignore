@@ -11,3 +11,6 @@ profile*
 ***/build/*
 ***/dist/*
 *.so
+extensions/
+
+!extensions/.gitkeep

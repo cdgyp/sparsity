@@ -1,7 +1,11 @@
+import sys
+import os
+for version in os.listdir(os.path.abspath('./extensions/lib')):
+    _relative_extensions_path = f'./extensions/lib/{version}/site-packages/jsrelu_ext-0.0-py3.8-linux-x86_64.egg'
+    sys.path.append(os.path.abspath(_relative_extensions_path))
 import torch
 from torch import nn
-
-
+import jsrelu_ext
 
 class CustomizedActivation(nn.Module):
     def __init__(self) -> None:
@@ -142,19 +146,20 @@ class _SparseJumpingSquaredReLU(torch.autograd.Function):
         derivative = (middle_x + 1).get_data() + larger * 5
         return grad_output * derivative
 
+
 import jsrelu_ext
 class _JumpingSquaredReLU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor):
-        return jsrelu_ext.forward(x)
         ctx.save_for_backward(x)
+        return jsrelu_ext.forward(x)
         y = x + 1
         y.square_().add_(-1).div_(2)
         return y * (x >= 0)
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output * jsrelu_ext.deriative(x)
         x,  = ctx.saved_tensors
+        return grad_output * jsrelu_ext.deriative(x)
         return grad_output * (x + 1) * (x >= 0)
     
 class _NumericalControlledJumpingSquaredReLU(torch.autograd.Function):

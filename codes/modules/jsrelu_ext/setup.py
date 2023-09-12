@@ -6,6 +6,7 @@ setup(
     ext_modules=[
         cpp_extension.CppExtension('jsrelu_ext', ['jsrelu.cpp']),
     ],
-    cmdclass={'build_ext': cpp_extension.BuildExtension}
+    cmdclass={'build_ext': cpp_extension.BuildExtension},
+    version="0.0"
 )
 
