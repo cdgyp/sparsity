@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from codes.base import Plugin
 from codes.base.base import BaseModule, Plugin, ModuleReference
-from einops import einsum
+from torch import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
 # from .vit import ViT, FeedForward

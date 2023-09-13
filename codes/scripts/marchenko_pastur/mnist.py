@@ -10,7 +10,6 @@ from torchvision.datasets import MNIST
 from torch.optim.lr_scheduler import LinearLR
 from torchvision import transforms
 import argparse
-import einops
 from PIL import Image
 
 from tensorboardX import SummaryWriter
@@ -159,7 +158,7 @@ class CovariancePlugin(Plugin):
             for index, inputs in [h.get() for h in self.hooks]:
                 if inputs is None or len(inputs) == 0:
                     continue
-                outer: torch.Tensor = einops.einsum(
+                outer: torch.Tensor = torch.einsum(
                     inputs, inputs,
                     '... i, ... j -> ... i j'
                 ).flatten(start_dim=0, end_dim=-3)
@@ -212,7 +211,7 @@ class CovariancePlugin(Plugin):
     def anisotropy(self, covariances: torch.Tensor, name: str=None, means=None):
         hidden_dim = covariances.shape[-1]
         if self.centered:
-            covariances = covariances - einops.einsum(
+            covariances = covariances - torch.einsum(
                     means,      means,
                     '... i ,    ... j  ->   ... i j'
                 )
