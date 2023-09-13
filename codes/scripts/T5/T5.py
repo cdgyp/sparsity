@@ -56,7 +56,7 @@ from torch.distributed import get_rank
 
 from transformers import (
     CONFIG_MAPPING,
-    FLAX_MODEL_FOR_MASKED_LM_MAPPING,
+    MODEL_FOR_MASKED_LM_MAPPING,
     AutoTokenizer,
     BatchEncoding,
     T5ForConditionalGeneration,
@@ -73,8 +73,8 @@ from transformers import (
     get_linear_schedule_with_warmup,
     enable_full_determinism
 )
-from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
-from transformers.models.t5 import T5LayerFF, DenseActDense
+# from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
+from transformers.models.t5.modeling_t5 import T5LayerFF, T5DenseActDense
 from transformers.utils import send_example_telemetry
 
 from  ...base import LossManager
@@ -83,7 +83,7 @@ from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
 
 
-MODEL_CONFIG_CLASSES = list(FLAX_MODEL_FOR_MASKED_LM_MAPPING.keys())
+MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
@@ -91,6 +91,7 @@ MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 class TrainingArguments:
     title: str = field()
     output_dir: str = field(
+        default=None,
         metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
     )
     overwrite_output_dir: bool = field(
@@ -134,13 +135,15 @@ class TrainingArguments:
     )
     hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
     
-    resume:str = field(default=None, metadata="path to the checkpoint to be resumed")
+    resume:str = field(default=None, metadata={"help": "path to the checkpoint to be resumed"})
 
-    compile: bool = field(default=False, metadata="whether to use `torch.compile`. `torch` above 2.0 is required. ")
+    compile: bool = field(default=False, metadata={"help": "whether to use `torch.compile`. `torch` above 2.0 is required. "})
 
     def __post_init__(self):
         if self.output_dir is not None:
             self.output_dir = os.path.expanduser(self.output_dir)
+        if self.max_steps is not None:
+            self.max_steps = int(self.max_steps)
 
     def to_dict(self):
         """
@@ -251,7 +254,7 @@ class DataTrainingArguments:
     """
 
     from_disk: bool = field(
-        default=False, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+        default=False, metadata={"help": "The local path to dataset."}
     )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
@@ -303,7 +306,7 @@ class DataTrainingArguments:
     )
 
     def __post_init__(self):
-        if self.dataset_name is None and self.train_file is None and self.validation_file is None:
+        if self.from_disk is None and self.dataset_name is None and self.train_file is None and self.validation_file is None:
             raise ValueError("Need either a dataset name or a training/validation file.")
         else:
             if self.train_file is not None:
@@ -313,6 +316,16 @@ class DataTrainingArguments:
                 extension = self.validation_file.split(".")[-1]
                 assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, a json or a txt file."
 
+def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int) -> torch.Tensor:
+    """
+    Shift input ids one token to the right.
+    """
+    shifted_input_ids = torch.zeros_like(input_ids)
+    shifted_input_ids.at[:, 1:] = input_ids[:, :-1]
+    shifted_input_ids.at[:, 0] = decoder_start_token_id
+
+    shifted_input_ids = torch.where(shifted_input_ids == -100, pad_token_id, shifted_input_ids)
+    return shifted_input_ids
 
 def compute_input_and_target_lengths(inputs_length, noise_density, mean_noise_span_length):
     """This function is copy of `random_spans_helper <https://github.com/google-research/text-to-text-transfer-transformer/blob/84f8bcc14b5f2c03de51bd3587609ba8f6bbd1cd/t5/data/preprocessors.py#L2466>`__ .
@@ -530,9 +543,9 @@ class DataCollatorForT5MLM:
 class T5Sparsify(Sparsify):
     def __init__(self) -> None:
         super().__init__()
-        self.mlp_types = [DenseActDense]
+        self.mlp_types = [T5DenseActDense]
 
-    def extract_linear_layers(self, mlp: DenseActDense) -> 'dict[str, torch.nn.Linear]':
+    def extract_linear_layers(self, mlp: T5DenseActDense) -> 'dict[str, torch.nn.Linear]':
         return {
             'key': mlp.wi,
             'value': mlp.wo
@@ -548,7 +561,7 @@ class T5Sparsify(Sparsify):
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
         for name, module in model.named_children():
             p = '.'.join(path, name)
-            if isinstance(module, DenseActDense):
+            if isinstance(module, T5DenseActDense):
                 if jsrelu:
                     setattr(model, 'act', ActivationPosition(JumpingSquaredReLU()))
                 else:
@@ -724,18 +737,6 @@ def main():
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     # send_example_telemetry("run_t5_mlm", model_args, data_args, framework="flax")
 
-
-    if (
-        os.path.exists(training_args.output_dir)
-        and os.listdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
-    ):
-        raise ValueError(
-            f"Output directory ({training_args.output_dir}) already exists and is not empty."
-            "Use --overwrite_output_dir to overcome."
-        )
-
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -749,16 +750,6 @@ def main():
     # Set the verbosity to info of the Transformers logger (on main process only):
     logger.info(f"Training/evaluation parameters {training_args}")
 
-    # Handle the repository creation
-    if training_args.push_to_hub:
-        # Retrieve of infer repo_name
-        repo_name = training_args.hub_model_id
-        if repo_name is None:
-            repo_name = Path(training_args.output_dir).absolute().name
-        # Create repo and retrieve repo_id
-        repo_id = create_repo(repo_name, exist_ok=True, token=training_args.hub_token).repo_id
-        # Clone repo locally
-        repo = Repository(training_args.output_dir, clone_from=repo_id, token=training_args.hub_token)
 
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
     # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
@@ -960,12 +951,34 @@ def main():
     eval_batch_size = per_device_eval_batch_size * torch.cuda.device_count()
 
     num_train_steps = len(tokenized_datasets["train"]) // train_batch_size * num_epochs
+    num_train_steps = min(num_train_steps, training_args.max_steps)
 
     # num_of_hosts = jax.process_count()
     # current_host_idx = jax.process_index()
 
     optimizer_scheduler = get_optimizer_scheduler(model, training_args)
 
+    # Handle the repository creation
+    if training_args.push_to_hub:
+        # Retrieve of infer repo_name
+        repo_name = training_args.hub_model_id
+        if repo_name is None:
+            repo_name = Path(training_args.output_dir).absolute().name
+        # Create repo and retrieve repo_id
+        repo_id = create_repo(repo_name, exist_ok=True, token=training_args.hub_token).repo_id
+        # Clone repo locally
+        repo = Repository(training_args.output_dir, clone_from=repo_id, token=training_args.hub_token)
+
+    if (
+        os.path.exists(training_args.output_dir)
+        and os.listdir(training_args.output_dir)
+        and training_args.do_train
+        and not training_args.overwrite_output_dir
+    ):
+        raise ValueError(
+            f"Output directory ({training_args.output_dir}) already exists and is not empty."
+            "Use --overwrite_output_dir to overcome."
+        )
 
     trainer_argument = Seq2SeqTrainingArguments(
         training_args.output_dir,
@@ -992,8 +1005,7 @@ def main():
         warmup_ratio=None,
         warmup_steps=None,
         torch_compile=training_args.compile,
-        torch_compile_mode='reduce-overhead'
-        optim
+        torch_compile_mode='reduce-overhead',
         # reproducibility
         full_determinism=True,
         seed=training_args.seed + dist.get_rank(),
