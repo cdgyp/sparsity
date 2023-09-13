@@ -241,3 +241,11 @@ try:
                     assert isinstance(keys, nn.Linear)
                     keys.bias.add_(shift_x)
 except: pass
+
+
+
+if __name__ == "__main__":
+    sjsrelu = _SparseJumpingSquaredReLU.apply
+    X = torch.randn([128, 128], device="cuda", requires_grad=True)
+    Y = sjsrelu(X).sum()
+    Y.backward()

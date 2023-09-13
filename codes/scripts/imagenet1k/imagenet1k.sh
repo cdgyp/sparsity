@@ -13,7 +13,7 @@ do
     else
         extra=" "
     fi
-    torchrun --nproc_per_node=$n_visible_devices --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:1453  module_wrapper.py codes.scripts.imagenet1k.imagenet1k   \
+    torchrun --nproc_per_node=$n_visible_devices --rdzv_backend=c10d  module_wrapper.py codes.scripts.imagenet1k.imagenet1k   \
         --model $model --start-epoch 0 --epochs 300 --batch-size-per-proc 512 --physical-batch-size 64 --opt adamw --lr 0.003 --wd 0.3 \
         --from-scratch  \
         --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \

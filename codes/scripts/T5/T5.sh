@@ -14,7 +14,7 @@ do
     else
         extra=" "
     fi
-    torchrun --nproc_per_node=$n_visible_devices --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:1454  module_wrapper.py codes.scripts.T5.T5  \
+    torchrun --nproc_per_node=$n_visible_devices --rdzv_backend=c10d module_wrapper.py codes.scripts.T5.T5  \
         --model_type                t5          \
         --config_name               t5-base     \
         --tokenizer_name            t5-base     \
