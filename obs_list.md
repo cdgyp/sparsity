@@ -4,5 +4,5 @@
 - [x] MagicSynapse
 - [ ] WideMLP
 - [x] 测量输入值线性层的梯度的范数
-- [ ] 在大数据集上测量 a/p, beta / p?
+- ~~[ ] 在大数据集上测量 a/p, beta / p?~~
   
