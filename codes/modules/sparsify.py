@@ -1,7 +1,7 @@
 import os
 import torch
 from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
-from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin
+from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin, VGradientObservationPlugin
 from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
 from .robustness import RestrictAffinePlugin, DoublyBiased, ZerothBiasPlugin
 from .magic import MagicSynapse
@@ -104,6 +104,7 @@ class Sparsify:
             ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
             SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
             EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
+            VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=log_per_step),
         ).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 

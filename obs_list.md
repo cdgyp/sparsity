@@ -3,6 +3,6 @@
 - [x] ZB 的 clipping 使用相对大小
 - [x] MagicSynapse
 - [ ] WideMLP
-- [ ] 测量输入值线性层的梯度的范数
+- [x] 测量输入值线性层的梯度的范数
 - [ ] 在大数据集上测量 a/p, beta / p?
   

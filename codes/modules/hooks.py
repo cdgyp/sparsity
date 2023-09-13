@@ -53,12 +53,27 @@ class ActivationMapHook(ForwardHook):
         self.activations: torch.Tensor = None
         self.pre_activations: torch.Tensor = None
         self.module = None
+        self.active = False
     def __call__(self, module: nn.Module, input, output):
+        if not self.active:
+            return
         assert isinstance(output, torch.Tensor), output
-        self.activations = output.to_dense().float()
+        if self.activations is None:
+            self.activations = []
+        if self.pre_activations is None:
+            self.pre_activations = []
+        self.activations.append(output.to_dense().float())
         assert isinstance(input, tuple) and len(input) == 1
-        self.pre_activations = input[0]
-        self.module = ModuleReference(module)
+        self.pre_activations.append(input[0])
+        if self.module is None:
+            self.module = ModuleReference(module)
+    def get_ready(self):
+        self.activations = torch.cat(self.activations, dim=0)
+        self.pre_activations = torch.cat(self.pre_activations, dim=0)
+    
+    def clean(self):
+        self.activations = None
+        self.pre_activations = None
 
     def hook_on_all(module: nn.Module, mlp_types):
         return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=ActivationMapHook)
@@ -67,18 +82,23 @@ class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
         super().__init__()
         self.gradients: torch.Tensor = None
+        self.active = False
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
+        if not self.active:
+            return
         assert (isinstance(grad_output, tuple) and len(grad_output) == 1) or isinstance(grad_output, torch.Tensor), grad_output
         grad = grad_output[0].to_dense().float() if isinstance(grad_output, tuple) else grad_output.to_dense().float()
         assert isinstance(grad, torch.Tensor), grad
-        self.gradients = grad
+        if self.gradients is None:
+            self.gradients = []
+        self.gradients.append(grad)
+    def clean(self):
+        self.gradients = None
     def hook_on_all(module: nn.Module, mlp_types):
         return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook)
-    def get(self):
-        res = self.gradients
-        self.gradients = None
-        return res
+    def get_ready(self):
+        self.gradients = torch.cat(self.gradients, dim=0)
     
 class GradientRecorder(BaseModule):
     def __init__(self, p=1, beta=0.9, label=''):
@@ -224,7 +244,17 @@ class IdleRecorder(BaseModule):
     def get_results(self):
         return dict()
 
-class ActivationObservationPlugin(Plugin):
+class HookingPlugin(Plugin):
+    def is_hook_active(self):
+        return (self.iteration % self.log_per_step == 0) or not self.training
+    def prepare(self, *args, **kwargs):
+        for h in self.hooks:
+            h.active = self.is_hook_active()
+    def clean(self):
+        for h in self.hooks:
+            h.clean()
+
+class ActivationObservationPlugin(HookingPlugin):
     def __init__(self, mlp_types, extract_linear_layers, p=1, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
@@ -246,6 +276,12 @@ class ActivationObservationPlugin(Plugin):
 
         self.log_per_step = log_per_step
         self.pre_activation_only = pre_activation_only
+    
+    def prepare(self, *args, **kwargs):
+        for h in self.activation_hooks:
+            h.active = self.is_hook_active()
+        for h in self.gradient_hooks:
+            h.active = self.is_hook_active()
 
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
@@ -266,6 +302,7 @@ class ActivationObservationPlugin(Plugin):
             assert self.training
             for i, h in enumerate(self.activation_hooks):
                 assert h.handle is not None
+                h.get_ready()
                 self.losses.observe(h.pre_activations.mean(), 'pre_activation', i)
                 if not self.pre_activation_only:
                     a = h.activations
@@ -302,6 +339,7 @@ class ActivationObservationPlugin(Plugin):
             assert self.training
             for i,  h in enumerate(self.gradient_hooks):
                 assert h.handle is not None
+                h.get_ready()
                 g = h.gradients
                 assert g.shape[1] == self.sizes[i], (g.shape[1], self.sizes[i], i, self.sizes)
 
@@ -344,10 +382,9 @@ class ActivationObservationPlugin(Plugin):
     def clean(self):
         if self.gradient_hooks[0].gradients is not None:
             for h in self.activation_hooks:
-                h.activations = None
-                h.pre_activations = None
+                h.clean()
         for h in self.gradient_hooks:
-            h.gradients = None
+            h.clean()
 
 
 class GradientNoisePlugin(Plugin):
@@ -469,14 +506,13 @@ class ParameterChangePlugin(Plugin):
             if self.training and self.iteration % (100 * self.log_per_step) == 0:
                 self.losses.histogram(self.initial_parameters - new_parameters, 'parameter_changes', 'absolute', bins=200)
         
-class ActivationDistributionPlugin(Plugin):
+class ActivationDistributionPlugin(HookingPlugin):
     def __init__(self, mlp_types, log_per_step=10, eps=1e-5):
         super().__init__()
         self.log_per_step = log_per_step
         self.main = None
         self.hooks: list[ActivationMapHook] = None
         self.mlp_types = mlp_types
-        self.activations = []
         self.eps = eps
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
@@ -489,6 +525,7 @@ class ActivationDistributionPlugin(Plugin):
         return res.float().mean()
     def do_logs(self):
         for i, h in enumerate(self.hooks):
+            h.get_ready()
             habitat = h.module.get_habitat()
             if self.training and self.iteration % (self.log_per_step * 100) == 0:
                 self.losses.histogram(h.activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
@@ -506,21 +543,13 @@ class ActivationDistributionPlugin(Plugin):
             
         with torch.no_grad():
             self.do_logs()
-            self.activations = []
-
-    def clean(self):
-        for h in self.hooks:
-            h.activations = None
-            h.pre_activations = None
-        if self.training:
-            self.activations = []
 
 class ActivationGradientHook(MlpGradientHook):
     def hook_on_all(module: nn.Module, mlp_types):
         return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=MlpGradientHook)
 
 
-class MkkTPlugin(Plugin):
+class MkkTPlugin(HookingPlugin):
     def __init__(self, mlp_types, extract_linear_layers, log_per_step=10, eps=1e-5):
         super().__init__()
         self.log_per_step = log_per_step
@@ -533,10 +562,12 @@ class MkkTPlugin(Plugin):
         layer = layer if isinstance(layer, torch.nn.Linear) else layer.linear
         return layer.weight
     
+    def is_hook_active(self):
+        return super().is_hook_active() and self.training
+    
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
         self.hooks = ActivationGradientHook.hook_on_all(main, self.mlp_types)
-        print(len(self.hooks))
 
     def entrysum(self, x: torch.Tensor, M: torch.Tensor=None):
         """compute $sum_(i, j) (x x^T hadamard M)_(i, j) = trace(x x^T M) = trace(x^T M x)$
@@ -556,9 +587,7 @@ class MkkTPlugin(Plugin):
             return (x ** 2).sum(dim=-1)
         else:
             return ((x ** 2) * torch.diagonal(M)).sum(dim=-1)
-    def clean(self):
-        for h in self.hooks:
-            h.gradients = None
+    
     def after_backward(self, *args, **kwargs):
         if self.iteration % self.log_per_step == 0 and self.training:
             with torch.no_grad():
@@ -578,6 +607,7 @@ class DiagonalityPlugin(MkkTPlugin):
         layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+            h.get_ready()
             key = self.get_weight_matrix(mlp, 'key')
             kkT = einsum(
                 key, key,
@@ -607,6 +637,7 @@ class SpectralIncreasePlugin(MkkTPlugin):
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+            h.get_ready()
             key = self.get_weight_matrix(mlp, 'key')
             g = h.gradients
 
@@ -674,6 +705,7 @@ class SpectralObservationPlugin(MkkTPlugin):
         layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
+            h.get_ready()
             g = h.gradients
 
             g2: torch.Tensor = g**2
@@ -707,10 +739,20 @@ class EffectiveGradientSparsity(MkkTPlugin):
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         super().register(main, plugins)
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
+    def prepare(self, *args, **kwargs):
+        super().prepare(*args, **kwargs)
+        for h in self.activation_hooks:
+            h.active = self.is_hook_active()
+    def clean(self):
+        super().clean()
+        for h in self.activation_hooks:
+            h.activations = None
+            h.pre_activations = None
     def do_logs(self):
         layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (hook_g, hook_a) in enumerate(zip(self.hooks, self.activation_hooks)):
+            hook_g.get_ready(); hook_a.get_ready()
             g = hook_g.gradients
             pre_activations = hook_a.pre_activations
             assert g.shape == pre_activations.shape, (g.shape, pre_activations.shape)
@@ -732,3 +774,30 @@ class EffectiveGradientSparsity(MkkTPlugin):
                 sum = (eta * selected).abs_().sum()
                 self.losses.observe(sign * sum, 'activation_effect', 'sum', i)
                 self.losses.observe(sign * sum /  count, 'activation_effect', 'average', i)
+
+
+class VGradientObservationPlugin(HookingPlugin):
+    def __init__(self, mlp_types, log_per_step=1):
+        super().__init__()
+        self.mlp_types = mlp_types
+        self.log_per_step = log_per_step
+        self.main: BaseModule = None
+        self.hooks: 'list[MlpGradientHook]' = None
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+        self.hooks = MlpGradientHook.hook_on_all(main, mlp_types=self.mlp_types)
+
+    def after_backward(self):
+        if self.iteration % self.log_per_step == 0:
+            with torch.no_grad():
+                self.do_logs()
+
+    def do_logs(self):
+        for i, h in enumerate(self.hooks):
+            h.get_ready()
+            g_V = h.gradients
+            self.losses.observe(g_V.norm(p=2, dim=-1).mean(), 'norm_g_V', i)
+
+    def clean(self):
+        for h in self.hooks:
+            h.clean()
