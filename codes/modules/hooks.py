@@ -1,3 +1,4 @@
+import os
 import torch
 from torch import nn
 from codes.base import Plugin
@@ -11,7 +12,9 @@ from .activations import CustomizedActivation, ActivationPosition
 from .magic import MagicSynapse
 
 def _is_instance(obj, types):
-    if len(types) == 1:
+    if not isinstance(types, list):
+        return isinstance(obj, types)
+    if not len(types) == 1:
         return isinstance(obj, types[0])
     for t in types:
         if isinstance(obj, t):  return True
@@ -23,9 +26,13 @@ class ActivationHook(Hook):
 
         res = []
         count = 0
-        print("ActivationHook: Deploying")
+        if 'RANK' in os.environ:
+            rank = f"rank {os.environ['RANK']}: "
+        else:
+            rank= ""
+        print(f"ActivationHook: {rank}Deploying {hook_type}")
         for name1, module in vit.named_modules():
-            if _is_instance(module, mlp_types):
+            if not _is_instance(module, mlp_types):
                 continue
             for name2, submodule in module.named_modules():
                 if _is_instance(submodule, target_module_types):
@@ -33,9 +40,9 @@ class ActivationHook(Hook):
                     h = hook_type()
                     h.hook_on(submodule)
                     res.append(h)
-                    print(f'\t{name1}.{name2}: {submodule.__class__}')
+                    print(f'\t{rank}{name1}-{name2}: {submodule.__class__}')
                     break
-        print(f"ActivationHook: {count} hooked")
+        print(f"ActivationHook: {rank}{count} {hook_type}s hooked")
         
         return res
 

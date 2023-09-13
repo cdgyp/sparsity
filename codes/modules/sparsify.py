@@ -5,6 +5,7 @@ from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityP
 from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
 from .robustness import RestrictAffinePlugin, DoublyBiased, ZerothBiasPlugin
 from .magic import MagicSynapse
+from torch.distributed import get_rank
 
 class Sparsify:
     def __init__(self) -> None:
@@ -12,7 +13,7 @@ class Sparsify:
         self.mlps = []
         self.mlp_types = []
     
-    def extract_linear_layer(self, mlp) -> 'dict[str, torch.nn.Linear]':
+    def extract_linear_layers(self, mlp) -> 'dict[str, torch.nn.Linear]':
         pass
 
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
@@ -76,7 +77,7 @@ class Sparsify:
         else:
             dir = name + '/' + title + '/'
 
-        writer, _ = new_experiment(dir, None, dir_to_runs='runs', resume=resume is not None and len(resume) > 0)
+        writer, _ = new_experiment(dir, None, dir_to_runs='runs', resume=resume is not None and len(resume) > 0, device=device)
 
         if db_mlp:
             print("Sparsify: replacing singly biased MLPs")

@@ -22,15 +22,15 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
     metric_logger = utils.MetricLogger(delimiter="  ", device=device)
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
     metric_logger.add_meter("img/s", utils.SmoothedValue(window_size=10, fmt="{value}"))
-    if isinstance(model, Model): model.losses.reset()
+    if hasattr(model, 'losses'): model.losses.reset()
 
     header = f"Epoch: [{epoch}]"
     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         start_time = time.time()
         image, target = image.to(device), target.to(device)
         image: torch.Tensor; target: torch.Tensor
-        assert args.batch_size % args.physical_batch_size == 0
-        chunks = int(math.ceil(args.batch_size // args.physical_batch_size))
+        assert args.batch_size_per_proc % args.physical_batch_size == 0
+        chunks = int(math.ceil(args.batch_size_per_proc // args.physical_batch_size))
         output = []; loss = []
         optimizer.zero_grad()
         for minibatch_image, minibatch_target in zip(image.chunk(chunks, dim=0), target.chunk(chunks, dim=0)):
@@ -56,7 +56,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
                 # we should unscale the gradients of optimizer's assigned params if do gradient clipping
                 nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
             
-            if isinstance(model, Model): model.after_backward()
+            if hasattr(model, 'after_backward'): model.after_backward()
 
             scaler.step(optimizer)
             scaler.update()
@@ -64,7 +64,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
             if args.clip_grad_norm is not None:
                 nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
 
-            if isinstance(model, Model): model.after_backward()
+            if hasattr(model, 'after_backward'): model.after_backward()
 
             optimizer.step()
 
@@ -81,7 +81,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
         metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
 
-        if isinstance(model, Model):
+        if hasattr(model, 'losses'):
             model.losses.observe(loss, 'loss')
             model.losses.observe(acc1 / 100, 'acc', 1)
             model.losses.observe(acc5 / 100, 'acc', 5)
@@ -99,7 +99,7 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = f"Test: {log_suffix}"
-    if isinstance(model, Model): model.losses.reset()
+    if hasattr(model, 'losses'): model.losses.reset()
 
     num_processed_samples = 0
     with torch.inference_mode():
@@ -135,7 +135,7 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
 
     metric_logger.synchronize_between_processes()
 
-    if isinstance(model, Model):
+    if hasattr(model, 'losses'):
         model.losses.observe(metric_logger.acc1.global_avg / 100, 'test_acc', 1)
         model.losses.observe(metric_logger.acc5.global_avg / 100, 'test_acc', 5)
         model.losses.log_losses(model.iteration, testing=True)
@@ -245,7 +245,7 @@ from .mymodel import get_imagenet1k_model
 
 def main(args):
     if args.physical_batch_size is None:
-        args.physical_batch_size = args.batch_size
+        args.physical_batch_size = args.batch_size_per_proc
     if args.physical_epochs is None:
         args.physical_epochs = args.epochs
     if args.from_scratch:
@@ -256,7 +256,7 @@ def main(args):
     utils.init_distributed_mode(args)
     print(args)
 
-    device = torch.device(args.device)
+    device = args.gpu if args.distributed else "cuda"
 
     if args.use_deterministic_algorithms:
         torch.backends.cudnn.benchmark = False
@@ -283,7 +283,7 @@ def main(args):
 
     data_loader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size_per_proc,
         sampler=train_sampler,
         num_workers=args.workers,
         pin_memory=True,
@@ -408,7 +408,7 @@ def main(args):
         # total_ema_updates = (Dataset_size / n_GPUs) * epochs / (batch_size_per_gpu * EMA_steps)
         # We consider constant = Dataset_size for a given dataset/setup and omit it. Thus:
         # adjust = 1 / total_ema_updates ~= n_GPUs * batch_size_per_gpu * EMA_steps / epochs
-        adjust = args.world_size * args.batch_size * args.model_ema_steps / args.epochs
+        adjust = args.world_size * args.batch_size_per_proc * args.model_ema_steps / args.epochs
         alpha = 1.0 - args.model_ema_decay
         alpha = min(1.0, alpha * adjust)
         model_ema = utils.ExponentialMovingAverage(model_without_ddp, device=device, decay=1.0 - alpha)
@@ -446,7 +446,7 @@ def main(args):
                     if args.distributed:
                         train_sampler.set_epoch(epoch)
                     train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
-                    if isinstance(model, Model) and args.max_iteration is not None and model.iteration >= args.max_iteration:
+                    if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
                         break
                     lr_scheduler.step()
                     evaluate(model, criterion, data_loader_test, device=device)
@@ -485,9 +485,8 @@ def get_args_parser(add_help=True):
 
     parser.add_argument("--data-path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
     parser.add_argument("--model", default="vanilla", type=str, help="model name")
-    parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
     parser.add_argument(
-        "-b", "--batch-size", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
+        "-b", "--batch-size-per-proc", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
     )
     parser.add_argument("--physical-batch-size", default=None, type=int, help="size of mini-batches (default: None, same value as --batch-size)")
     parser.add_argument("--epochs", default=90, type=int, metavar="N", help="(logical) number of total epochs to run")

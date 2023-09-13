@@ -7,12 +7,14 @@ from ...modules.sparsify import Sparsify
 from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, EncoderBlock
 from ...modules.robustness import DoublyBiased
 
+from torch.distributed import get_rank
+
 
 class ImageNet1kSparsify(Sparsify):
     def __init__(self) -> None:
         super().__init__()
         self.mlp_types = [MLPBlock]
-    def extract_linear_layer(self, mlp: MLPBlock) -> 'dict[str, torch.nn.Linear]':
+    def extract_linear_layers(self, mlp: MLPBlock) -> 'dict[str, torch.nn.Linear]':
         linears = {
             'key': mlp[0],
             'value': mlp[3]
@@ -41,7 +43,9 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
     
-    model, _, output_dir = ImageNet1kSparsify()('imagenet1k', args.title + '/' + model_type,
+    model, _, output_dir = ImageNet1kSparsify()(
+            'imagenet1k', 
+            args.title + '/' + model_type,
             vit,
             sparsified,
             sparsified,
@@ -50,7 +54,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
             args.zeroth_bias_clipping,
             rho=args.magic_synapse_rho,
             log_per_step=args.log_per_step,
-            device=args.device,
+            device=args.gpu if args.distributed else "cuda",
             epoch_size=epoch_size,
             start_epoch=start_epoch,
             resume=args.resume,

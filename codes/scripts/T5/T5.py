@@ -33,7 +33,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from itertools import chain
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from torch import nn
 from torch import distributed as dist
 
@@ -43,13 +43,16 @@ from torch import distributed as dist
 import numpy as np
 # import optax
 from datasets import load_dataset, load_from_disk
-import evaluate
+from transformers.trainer_callback import TrainerControl, TrainerState
+from transformers.training_args import TrainingArguments
+# import evaluate
 # from flax import jax_utils, traverse_util
 # from flax.jax_utils import pad_shard_unpad
 # from flax.training import train_state
 # from flax.training.common_utils import get_metrics, onehot, shard
 from huggingface_hub import Repository, create_repo
 from tqdm import tqdm
+from torch.distributed import get_rank
 
 from transformers import (
     CONFIG_MAPPING,
@@ -62,8 +65,10 @@ from transformers import (
     T5Config,
     is_tensorboard_available,
     set_seed,
+    Trainer,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
     AdamW, Adafactor,
     get_linear_schedule_with_warmup,
     enable_full_determinism
@@ -72,6 +77,7 @@ from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
 from transformers.models.t5 import T5LayerFF, DenseActDense
 from transformers.utils import send_example_telemetry
 
+from  ...base import LossManager
 from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
@@ -526,7 +532,7 @@ class T5Sparsify(Sparsify):
         super().__init__()
         self.mlp_types = [DenseActDense]
 
-    def extract_linear_layer(self, mlp: DenseActDense) -> dict[str, torch.nn.Linear]:
+    def extract_linear_layers(self, mlp: DenseActDense) -> 'dict[str, torch.nn.Linear]':
         return {
             'key': mlp.wi,
             'value': mlp.wo
@@ -583,9 +589,10 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         db_mlp_shape=[max(inputs_length, targets_length), T5.config.d_model],
         rho=model_args.magic_synapse_rho,
         log_per_step=training_args.logging_steps,
-        steps=TODO,
+        steps=0,
         start_epoch=0,
         resume=training_args.resume,
+        device=get_rank() if 'RANK' in os.environ else 0
     )
     training_args.output_dir = output_dir
     return model, writer
@@ -628,7 +635,7 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
     if training_args.adafactor:
         optimizer = Adafactor(param_groups, lr=training_args.learning_rate)
     else:
-        optimizer = AdamW(param_groups, lr=training_args.learning_rate)
+        optimizer = AdamW(param_groups, lr=training_args.learning_rate, betas=[training_args.adam_beta1, training_args.adam_beta2], eps=training_args.adam_epsilon)
     
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=training_args.warmup_steps, num_training_steps=training_args.max_steps)
     return optimizer, scheduler
@@ -668,6 +675,31 @@ class CrossEntropyMetric(TbMetric):
             'ce': loss,
         }
 
+
+class LoggingCallback(TrainerCallback):
+    def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        if hasattr(model, 'iteration'):
+            model.iteartion += 1
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        optimizer = kwargs['optimizer']
+        if hasattr(model, 'after_backward'):
+            model.after_backward()
+        if hasattr(model, 'losses'):
+            losses: LossManager = model.losses
+            losses.observe(optimizer.param_groups[0]["lr"], "lr")
+            if model.iteration % args.logging_steps == 0:
+                losses.log_losses(model.iteration)
+            losses.reset()
+
+    def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        if hasattr(model, 'losses'):
+            model.losses.log_losses(model.iteration, testing=True)
+            model.losses.reset()
+            
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -692,7 +724,6 @@ def main():
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     # send_example_telemetry("run_t5_mlm", model_args, data_args, framework="flax")
 
-    enable_full_determinism(training_args.seed + dist.get_rank())
 
     if (
         os.path.exists(training_args.output_dir)
@@ -944,10 +975,11 @@ def main():
         do_eval=training_args.do_eval,
         do_predict=False,
         evaluation_strategy="steps",
+        save_strategy="steps",
         save_steps=training_args.save_steps,
         eval_steps=training_args.eval_steps,
         logging_steps=training_args.logging_steps,
-        per_device_eval_batch_size=per_device_eval_batch_size,
+        per_device_eval_batch_size=training_args.per_device_eval_batch_size,
         per_device_train_batch_size=training_args.per_device_train_batch_size,
         gradient_accumulation_steps=training_args.gradient_accumulation_steps,
         learning_rate=training_args.learning_rate,
@@ -959,6 +991,12 @@ def main():
         lr_scheduler_type=None,
         warmup_ratio=None,
         warmup_steps=None,
+        torch_compile=training_args.compile,
+        torch_compile_mode='reduce-overhead'
+        optim
+        # reproducibility
+        full_determinism=True,
+        seed=training_args.seed + dist.get_rank(),
     )
 
     metric = CrossEntropyMetric(training_args.eval_step, writer=summary_writer)
@@ -973,11 +1011,8 @@ def main():
         compute_metrics=metric.compute_metrics,
     )
 
-    if training_args.compile:
-        train = torch.compile(trainer.train, mode='reduce-overhead')
-    else:
-        train = trainer.train
-    train(
+    trainer.add_callback()
+    trainer.train(
         resume_from_checkpoint=training_args.resume
     )
 
