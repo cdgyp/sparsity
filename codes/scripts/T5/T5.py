@@ -692,25 +692,33 @@ class CrossEntropyMetric(TbMetric):
 class LoggingCallback(TrainerCallback):
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
-        if hasattr(model, 'iteration'):
-            model.iteartion += 1
+        model.epoch += 1
+    def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        model.iteration += 1
+        
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         optimizer = kwargs['optimizer']
-        if hasattr(model, 'after_backward'):
-            model.after_backward()
-        if hasattr(model, 'losses'):
-            losses: LossManager = model.losses
-            losses.observe(optimizer.param_groups[0]["lr"], "lr")
-            if model.iteration % args.logging_steps == 0:
-                losses.log_losses(model.iteration)
-            losses.reset()
+        model.after_minibatch_backward()
+        model.after_backward()
+        losses: LossManager = model.losses
+        losses.observe(optimizer.param_groups[0]["lr"], "lr")
+        losses.observe(model.train_loss, "loss")
+        if model.iteration % args.logging_steps == 0:
+            losses.log_losses(model.iteration)
+        losses.reset()
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
-        if hasattr(model, 'losses'):
-            model.losses.log_losses(model.iteration, testing=True)
-            model.losses.reset()
+        model.losses.log_losses(model.iteration, testing=True)
+        model.losses.reset()
+
+class CustomSeq2SeqTrainer(Seq2SeqTrainer):
+    def training_step(self, model, inputs):
+        tr_loss =  super().training_step(model, inputs)
+        model.train_loss = tr_loss
+        return tr_loss
             
 
 def main():
@@ -1013,7 +1021,7 @@ def main():
 
     metric = CrossEntropyMetric(training_args.eval_step, writer=summary_writer)
 
-    trainer = Seq2SeqTrainer(
+    trainer = CustomSeq2SeqTrainer(
         model=model,
         args=trainer_argument,
         data_collator=data_collator,
