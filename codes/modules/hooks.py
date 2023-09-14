@@ -763,14 +763,14 @@ class EffectiveGradientSparsity(MkkTPlugin):
             for p in [1, 2]:
                 self.losses.observe((eta.abs()**p).sum(dim=-1).mean(), 'effective_sparsity_norm', p, i)
             
-            for sign in [+1, -1]:
+            for sign, name in zip([+1, -1], ['beneficial', 'detrimental']):
                 selected = (sign * eta < 0)
                 count = selected.sum()
-                self.losses.observe(sign * count.float(), 'activation_effect', 'count', i)
+                self.losses.observe(sign * count.float(), 'activation_effect', 'count', name, i)
 
                 sum = (eta * selected).abs_().sum()
-                self.losses.observe(sign * sum, 'activation_effect', 'sum', i)
-                self.losses.observe(sign * sum /  count, 'activation_effect', 'average', i)
+                self.losses.observe(sign * sum, 'activation_effect', 'sum', name, i)
+                self.losses.observe(sign * sum /  count, 'activation_effect', 'average', name, i)
 
 
 class VGradientObservationPlugin(HookingPlugin):
