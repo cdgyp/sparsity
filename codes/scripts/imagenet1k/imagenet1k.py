@@ -1,20 +1,72 @@
-import datetime
+# if __name__ == "__main__":
+    # import multiprocessing
+    # multiprocessing. set_start_method("spawn")
 import os
+import datetime
 import time
+from typing import Union
 import warnings
 import math
 
 import torch
+from torch.nn.modules.module import Module
 import torch.utils.data
 import torchvision
 import torchvision.transforms
 from . import utils, transforms, presets
 from .sampler import RASampler
-from torch import nn
+from torch import Tensor, nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 from ...base import LossManager, Model
 from ...scheduler.sine import SineAnnealingScheduler
+
+import inspect
+
+class ForwardingDistributedDataParallel(torch.nn.parallel.DistributedDataParallel):
+
+    def get_properties(self, obj=None):
+        """Return a list of property names of an object."""
+        if obj is None: obj = self.module
+        return [name for name, value in inspect.getmembers(obj.__class__, predicate=inspect.isdatadescriptor) if type(value) is property]
+
+    def create_property(self, prop_name):
+        def getter(self):
+            return getattr(self.module, prop_name)
+
+        # Setter function
+        def setter(self, value):
+            setattr(self.module, prop_name, value)
+
+        # Create and return a property
+        return property(getter, setter)
+
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except:
+            if name == 'iteration':
+                print("getattr", name, self.module.__class__)
+            return getattr(self.module, name)
+    def __setattr__(self, name: str, value) -> None:
+        try: 
+            super().__setattr__(name, value)
+        except:
+            if name == 'iteration':
+                print("setattr", name, self.module.__class__)
+            setattr(self.module, name, value)
+
+def addprop(inst):
+    names = inst.get_properties()
+    properties = [inst.create_property(n) for n in names]
+    cls = type(inst)
+    if not hasattr(cls, '__perinstance'):
+        cls = type(cls.__name__, (cls,), {})
+        cls.__perinstance = True
+        inst.__class__ = cls
+    for n, p in zip(names, properties):
+        setattr(cls, n, p)
+    return inst
 
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
@@ -44,6 +96,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
                         scaler.scale(minibatch_loss).backward()
                     else:
                         minibatch_loss.backward()
+                if hasattr(model, 'after_minibatch_backward'):
+                    model.after_minibatch_backward()
             output.append(minibatch_output);loss.append(minibatch_loss)
         
         with torch.no_grad():
@@ -289,11 +343,11 @@ def main(args):
         pin_memory=True,
         collate_fn=collate_fn,
         drop_last=True,
-        persistent_workers=True
+        persistent_workers=True if args.workers > 0 else False
     )
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test, batch_size=args.physical_batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True, drop_last=True,
-        persistent_workers=True
+        persistent_workers=True if args.workers > 0 else False
     )
 
     if args.resume:
@@ -397,7 +451,7 @@ def main(args):
 
     model_without_ddp = model
     if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model = addprop(ForwardingDistributedDataParallel(model, device_ids=[args.gpu]))
         model_without_ddp = model.module
 
     model_ema = None
