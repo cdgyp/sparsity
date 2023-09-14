@@ -159,7 +159,7 @@ class _JumpingSquaredReLU(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         x,  = ctx.saved_tensors
-        return grad_output * jsrelu_ext.deriative(x)
+        return grad_output * jsrelu_ext.derivative(x)
         return grad_output * (x + 1) * (x >= 0)
     
 class _NumericalControlledJumpingSquaredReLU(torch.autograd.Function):
