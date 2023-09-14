@@ -40,7 +40,7 @@ class ActivationHook(Hook):
                     h = hook_type()
                     h.hook_on(submodule)
                     res.append(h)
-                    print(f'\t{rank}{name1}-{name2}: {submodule.__class__}')
+                    print(f'\t{rank}{name1}{name2}: {submodule.__class__}')
                     break
         print(f"ActivationHook: {rank}{count} {hook_type}s hooked")
         
@@ -67,9 +67,8 @@ class ActivationMapHook(ForwardHook):
         self.pre_activations.append(input[0])
         if self.module is None:
             self.module = ModuleReference(module)
-    def get_ready(self):
-        self.activations = torch.cat(self.activations, dim=0)
-        self.pre_activations = torch.cat(self.pre_activations, dim=0)
+    def get(self):
+        return torch.cat(self.activations, dim=0), torch.cat(self.pre_activations, dim=0)
     
     def clean(self):
         self.activations = None
@@ -97,8 +96,8 @@ class MlpGradientHook(BackwardHook):
         self.gradients = None
     def hook_on_all(module: nn.Module, mlp_types):
         return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook)
-    def get_ready(self):
-        self.gradients = torch.cat(self.gradients, dim=0)
+    def get(self):
+        return torch.cat(self.gradients, dim=0)
     
 class GradientRecorder(BaseModule):
     def __init__(self, p=1, beta=0.9, label=''):
@@ -302,10 +301,9 @@ class ActivationObservationPlugin(HookingPlugin):
             assert self.training
             for i, h in enumerate(self.activation_hooks):
                 assert h.handle is not None
-                h.get_ready()
-                self.losses.observe(h.pre_activations.mean(), 'pre_activation', i)
+                a, pre_a = h.get()
+                self.losses.observe(pre_a.mean(), 'pre_activation', i)
                 if not self.pre_activation_only:
-                    a = h.activations
                     assert len(a.shape) > 1
                     great_than_zero = (a.abs() > 0).float()
                     self.losses.observe(great_than_zero.mean(), 'activation', 'ratio', i)
@@ -323,9 +321,10 @@ class ActivationObservationPlugin(HookingPlugin):
                         self.sizes.append(a.shape[1])
                     self.sizes[i] = a.shape[1]
                     assert len(self.sizes) > i
+                h.clean()
 
         return res
-    def after_backward(self):
+    def after_minibatch_backward(self):
         if self.pre_activation_only:
             return
         if not self.training:
@@ -517,7 +516,6 @@ class ActivationDistributionPlugin(HookingPlugin):
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
         self.hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
-        print(len(self.hooks))
     def fall_within(self, values: torch.Tensor, ranges: torch.Tensor):
         res = torch.zeros_like(values, dtype=torch.bool)
         for range in ranges:
@@ -525,17 +523,20 @@ class ActivationDistributionPlugin(HookingPlugin):
         return res.float().mean()
     def do_logs(self):
         for i, h in enumerate(self.hooks):
-            h.get_ready()
+            activations, pre_activations = h.get()
             habitat = h.module.get_habitat()
             if self.training and self.iteration % (self.log_per_step * 100) == 0:
-                self.losses.histogram(h.activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
-                self.losses.histogram(h.pre_activations.flatten().clamp(min=habitat['view_x'][0, 0].item(), max=habitat['view_x'][0, 1].item()), 'pre_activation_distribution', i, bins=200)
+                self.losses.histogram(activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
+                self.losses.histogram(pre_activations.flatten().clamp(min=habitat['view_x'][0, 0].item(), max=habitat['view_x'][0, 1].item()), 'pre_activation_distribution', i, bins=200)
             
             if self.iteration % self.log_per_step == 0 or not self.training:
                 status = 'train' if self.training else 'test'
-                self.losses.observe(self.fall_within(h.pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_({status})', 'pre_activation', i)
-                self.losses.observe(self.fall_within(h.activations.flatten(), habitat['y']).mean(), f'activation_concentration_({status})', 'activation', i)
+                self.losses.observe(self.fall_within(pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_({status})', 'pre_activation', i)
+                self.losses.observe(self.fall_within(activations.flatten(), habitat['y']).mean(), f'activation_concentration_({status})', 'activation', i)
+            h.clean()
             
+    def is_hook_active(self):
+        return not (self.iteration % self.log_per_step != 0 and self.training)
     
     def forward(self, *args, **kwargs):
         if self.iteration % self.log_per_step != 0 and self.training:
@@ -588,10 +589,11 @@ class MkkTPlugin(HookingPlugin):
         else:
             return ((x ** 2) * torch.diagonal(M)).sum(dim=-1)
     
-    def after_backward(self, *args, **kwargs):
+    def after_minibatch_backward(self, *args, **kwargs):
         if self.iteration % self.log_per_step == 0 and self.training:
             with torch.no_grad():
                 self.do_logs()
+            self.clean()
         
 class DiagonalityPlugin(MkkTPlugin):
     def single_log(self, name, p, i, sum_diagonals, sum_nondiagonals):
@@ -607,7 +609,7 @@ class DiagonalityPlugin(MkkTPlugin):
         layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            h.get_ready()
+            g = h.get()
             key = self.get_weight_matrix(mlp, 'key')
             kkT = einsum(
                 key, key,
@@ -620,7 +622,6 @@ class DiagonalityPlugin(MkkTPlugin):
                 sum_nondiagonals = matrix.sum() - sum_diagonals
                 self.single_log('kkT', p, i, sum_diagonals, sum_nondiagonals)
 
-            g = h.gradients
             for p in [1, 2]:
                 for name, another_p in [('M', None), ('hadamard', kkT.abs() ** p)]:
                     x = g.abs() ** p
@@ -637,9 +638,8 @@ class SpectralIncreasePlugin(MkkTPlugin):
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            h.get_ready()
+            g = h.get()
             key = self.get_weight_matrix(mlp, 'key')
-            g = h.gradients
 
             self.losses.observe(key.square().sum(), 'spectral_increase', 'kkT', i) # trace(K K^T) = || K ||_2^2
             self.losses.observe(g.square().sum(dim=-1).mean(), 'spectral_increase', 'M', i) # trace(M) = trace(g g^T) = || g ||_2^2
@@ -705,8 +705,7 @@ class SpectralObservationPlugin(MkkTPlugin):
         layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (mlp, h) in enumerate(zip(layers, self.hooks)):
-            h.get_ready()
-            g = h.gradients
+            g = h.get()
 
             g2: torch.Tensor = g**2
             min_g2, max_g2 = g2.min(dim=-1)[0], g2.max(dim=-1)[0]
@@ -746,15 +745,13 @@ class EffectiveGradientSparsity(MkkTPlugin):
     def clean(self):
         super().clean()
         for h in self.activation_hooks:
-            h.activations = None
-            h.pre_activations = None
+            h.clean()
     def do_logs(self):
         layers = [m for m in self.main.modules() if _is_instance(m, self.mlp_types)]
         assert len(layers) == len(self.hooks), (len(layers), len(self.hooks))
         for i, (hook_g, hook_a) in enumerate(zip(self.hooks, self.activation_hooks)):
-            hook_g.get_ready(); hook_a.get_ready()
-            g = hook_g.gradients
-            pre_activations = hook_a.pre_activations
+            g = hook_g.get()
+            _, pre_activations = hook_a.get()
             assert g.shape == pre_activations.shape, (g.shape, pre_activations.shape)
             activation_function = hook_a.module.main
             gamma = activation_function.derivative(pre_activations)
@@ -769,7 +766,7 @@ class EffectiveGradientSparsity(MkkTPlugin):
             for sign in [+1, -1]:
                 selected = (sign * eta < 0)
                 count = selected.sum()
-                self.losses.observe(sign * count, 'activation_effect', 'count', i)
+                self.losses.observe(sign * count.float(), 'activation_effect', 'count', i)
 
                 sum = (eta * selected).abs_().sum()
                 self.losses.observe(sign * sum, 'activation_effect', 'sum', i)
@@ -787,15 +784,14 @@ class VGradientObservationPlugin(HookingPlugin):
         self.main = ModuleReference(main)
         self.hooks = MlpGradientHook.hook_on_all(main, mlp_types=self.mlp_types)
 
-    def after_backward(self):
+    def after_minibatch_backward(self):
         if self.iteration % self.log_per_step == 0:
             with torch.no_grad():
                 self.do_logs()
 
     def do_logs(self):
         for i, h in enumerate(self.hooks):
-            h.get_ready()
-            g_V = h.gradients
+            g_V = h.get()
             self.losses.observe(g_V.norm(p=2, dim=-1).mean(), 'norm_g_V', i)
 
     def clean(self):
