@@ -18,7 +18,7 @@ from .sampler import RASampler
 from torch import Tensor, nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
-from ...base import LossManager, Model
+from ...base import LossManager, Model, addprop
 from ...scheduler.sine import SineAnnealingScheduler
 
 import inspect
@@ -55,19 +55,6 @@ class ForwardingDistributedDataParallel(torch.nn.parallel.DistributedDataParalle
             if name == 'iteration':
                 print("setattr", name, self.module.__class__)
             setattr(self.module, name, value)
-
-def addprop(inst):
-    names = inst.get_properties()
-    properties = [inst.create_property(n) for n in names]
-    cls = type(inst)
-    if not hasattr(cls, '__perinstance'):
-        cls = type(cls.__name__, (cls,), {})
-        cls.__perinstance = True
-        inst.__class__ = cls
-    for n, p in zip(names, properties):
-        setattr(cls, n, p)
-    return inst
-
 
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
     model.train()
