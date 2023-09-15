@@ -3,7 +3,7 @@ runs
 ***.pdf
 pic
 ./data/***
-data/
+data
 !***/.gitkeep
 data/imagenet1k256
 dumps/***
