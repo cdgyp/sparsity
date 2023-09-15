@@ -21,7 +21,7 @@ do
         --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
         --clip-grad-norm 1 --ra-sampler --cutmix-alpha 1.0 \
         --amp \
-        --log_per_step 100 --save-every-epoch 5 --physical-epochs 300 \
+        --log_per_step 100 --save-every-epoch 10 --physical-epochs 300 \
         --zeroth-bias-clipping 0.1\
         --magic-synapse-rho 0.1 $extra    \
         "$@"
