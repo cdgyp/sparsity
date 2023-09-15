@@ -42,7 +42,7 @@ from torch import distributed as dist
 # import jax.numpy as jnp
 import numpy as np
 # import optax
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset, load_from_disk, DatasetDict
 from transformers.trainer_callback import TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 # import evaluate
@@ -71,6 +71,7 @@ from transformers import (
     TrainerCallback,
     AdamW, Adafactor,
     get_linear_schedule_with_warmup,
+    get_inverse_sqrt_schedule,
     enable_full_determinism
 )
 # from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
@@ -650,7 +651,7 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
     else:
         optimizer = AdamW(param_groups, lr=training_args.learning_rate, betas=[training_args.adam_beta1, training_args.adam_beta2], eps=training_args.adam_epsilon)
     
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=training_args.warmup_steps, num_training_steps=training_args.max_steps)
+    scheduler = get_inverse_sqrt_schedule(optimizer, num_warmup_steps=training_args.warmup_steps)
     return optimizer, scheduler
 
 from torch.utils.tensorboard import SummaryWriter
@@ -768,9 +769,12 @@ def main():
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         if data_args.from_disk:
-            datasets = load_from_disk(
-                data_args.dataset_name,
-            )
+            try:
+                datasets = load_from_disk(
+                    data_args.dataset_name,
+                )
+            except:
+                datasets = DatasetDict()
         else:
             datasets = load_dataset(
                 data_args.dataset_name,
@@ -780,8 +784,7 @@ def main():
             )
 
         if "validation" not in datasets.keys():
-            datasets = {}
-            if data_args.fomr_disk:
+            if data_args.from_disk:
                 datasets["validation"] = load_from_disk(
                     os.path.join(data_args.dataset_name, 'validation'),
                 )
@@ -908,6 +911,7 @@ def main():
         noise_density=data_args.mlm_probability,
         mean_noise_span_length=data_args.mean_noise_span_length,
     )
+    print("expanded_inputs_length:", expanded_inputs_length, "targets_length:", targets_length)
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of expanded_inputs_length.
     def group_texts(examples):
