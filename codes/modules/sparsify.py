@@ -119,4 +119,6 @@ class Sparsify:
             with torch.no_grad():
                 X, Y = next(iter(dataloader))
                 pred = model(X.to(device)[:physical_batch_size])
+                if hasattr(model, 'clean'):
+                    model.clean()
         return model, writer, output_dir
