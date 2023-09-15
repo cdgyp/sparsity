@@ -503,7 +503,7 @@ def main(args):
                             checkpoint["model_ema"] = model_ema.state_dict()
                         if scaler:
                             checkpoint["scaler"] = scaler.state_dict()
-                        if epoch % args.save_every_epochs:
+                        if epoch % args.save_every_epoch:
                             utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
                         utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
