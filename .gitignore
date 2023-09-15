@@ -15,3 +15,6 @@ profile*
 extensions/
 
 !extensions/.gitkeep
+
+hf_caches
+!hf_caches/.gitkeep
