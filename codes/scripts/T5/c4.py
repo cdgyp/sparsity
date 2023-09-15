@@ -6,7 +6,7 @@ parser = ArgumentParser()
 parser.add_argument('--n-train', type=int, default=100000)
 parser.add_argument('--n-val', type=int, default=100000)
 parser.add_argument('--chunk-size', type=int, default=1000000)
-parser.add_argument('--seed', type=int, default=42)
+parser.add_argument('--seed', type=int, default=None)
 args = parser.parse_args()
 
 def download_subset(*names, split="train", sample_count=10000, save_path=".", chunk_size=10000000, seed=42):
@@ -20,12 +20,11 @@ def download_subset(*names, split="train", sample_count=10000, save_path=".", ch
     save_path (str): 保存子集的位置。
     chunk_size (int): 每个子集的大小。
 
-    返回:
-    None
     """
     
     dataset_streaming = load_dataset(*names, split=split, streaming=True)
-    dataset_streaming = dataset_streaming.shuffle(seed=seed, buffer_size=400_000_000)
+    if seed is not None:
+        dataset_streaming = dataset_streaming.shuffle(seed=seed, buffer_size=400_000_000)
     selected_samples = []
     chunk_num = 0
 
