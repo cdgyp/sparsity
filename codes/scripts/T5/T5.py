@@ -71,6 +71,7 @@ from transformers import (
     TrainerCallback,
     AdamW, Adafactor,
     get_linear_schedule_with_warmup,
+    get_inverse_sqrt_schedule,
     enable_full_determinism
 )
 # from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
@@ -650,7 +651,7 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
     else:
         optimizer = AdamW(param_groups, lr=training_args.learning_rate, betas=[training_args.adam_beta1, training_args.adam_beta2], eps=training_args.adam_epsilon)
     
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=training_args.warmup_steps, num_training_steps=training_args.max_steps)
+    scheduler = get_inverse_sqrt_schedule(optimizer, num_warmup_steps=training_args.warmup_steps)
     return optimizer, scheduler
 
 from torch.utils.tensorboard import SummaryWriter
