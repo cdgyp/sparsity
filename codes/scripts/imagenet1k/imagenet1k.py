@@ -34,11 +34,9 @@ class ForwardingDistributedDataParallel(torch.nn.parallel.DistributedDataParalle
         def getter(self):
             return getattr(self.module, prop_name)
 
-        # Setter function
         def setter(self, value):
             setattr(self.module, prop_name, value)
 
-        # Create and return a property
         return property(getter, setter)
 
     def __getattr__(self, name: str):
@@ -505,7 +503,8 @@ def main(args):
                             checkpoint["model_ema"] = model_ema.state_dict()
                         if scaler:
                             checkpoint["scaler"] = scaler.state_dict()
-                        utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+                        if epoch % args.save_every_epochs:
+                            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
                         utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
         total_time = time.time() - start_time
@@ -650,6 +649,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
     parser.add_argument("--backend", default="PIL", type=str.lower, help="PIL or tensor - case insensitive")
     parser.add_argument("--log_per_step", type=int, default=10, help="the number of steps between two logging")
+    parser.add_argument("--save-every-epoch", type=int, default=5, help="the number of epochs between two saving")
     parser.add_argument("--from-scratch", action="store_true")
     parser.add_argument("--zeroth-bias-clipping", type=float, default=0.1, help="the upperbound of absolute values of entries in implicit adversarial sample layer.")
     parser.add_argument("--wide", action="store_true", help="turn on wide MLP for transformers")
