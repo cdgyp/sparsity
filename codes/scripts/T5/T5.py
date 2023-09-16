@@ -1053,6 +1053,7 @@ def main():
         # reproducibility
         full_determinism=True,
         seed=training_args.seed + dist.get_rank(),
+        fp16=True, # open automatic mixed precision
     )
 
     metric = CrossEntropyMetric(training_args.eval_steps, writer=summary_writer)

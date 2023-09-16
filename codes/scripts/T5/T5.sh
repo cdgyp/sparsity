@@ -18,7 +18,7 @@ do
         --model_type                t5                      \
         --config_name               hf_caches/t5-base       \
         --tokenizer_name            hf_caches/t5-base       \
-        --dtype                     bfloat16    \
+        --dtype                     float32     \
         --overwrite_output_dir                  \
         --do_train                              \
         --do_eval                               \
