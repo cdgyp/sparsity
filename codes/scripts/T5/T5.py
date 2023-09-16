@@ -136,9 +136,10 @@ class TrainingArguments:
     )
     hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
     
-    resume:str = field(default=None, metadata={"help": "path to the checkpoint to be resumed"})
+    resume:str = field(default=None, metadata={"help": "Path to the checkpoint to be resumed"})
 
-    compile: bool = field(default=False, metadata={"help": "whether to use `torch.compile`. `torch` above 2.0 is required. "})
+    compile: bool = field(default=False, metadata={"help": "Whether to use `torch.compile`. `torch` above 2.0 is required. "})
+
 
     def __post_init__(self):
         if self.output_dir is not None:
@@ -720,6 +721,14 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         tr_loss =  super().training_step(model, inputs)
         model.train_loss = tr_loss
         return tr_loss
+
+
+class TokenizingFunction:
+    def __init__(self, tokenizer, text_column_name):
+        self.tokenizer = tokenizer
+        self.text_column_name = text_column_name
+    def __call__(self, examples):
+        return self.tokenizer(examples[self.text_column_name], return_attention_mask=False)
             
 
 def main():
@@ -892,9 +901,8 @@ def main():
 
     # Otherwise, we tokenize every text, then concatenate them together before splitting them in smaller parts.
     # Since we make sure that all sequences are of the same length, no attention_mask is needed.
-    def tokenize_function(examples):
-        return tokenizer(examples[text_column_name], return_attention_mask=False)
 
+    tokenize_function = TokenizingFunction(tokenizer=tokenizer, text_column_name=text_column_name)
     tokenized_datasets = datasets.map(
         tokenize_function,
         batched=True,

@@ -6,11 +6,30 @@ def main():
         print("Usage: wrapper.py module.path [args...]")
         sys.exit(1)
 
+
+    backup_argv = sys.argv
+    sys.argv = list(sys.argv)
+
+    # if '--' in sys.argv[1]:
+        # for i in range(1, len(sys.argv)):
+            # if '--' not in sys.argv[i]:
+                # module = sys.argv.pop(i)
+                # sys.argv.insert(1, module)
+                # break
+    # for i in range(len(range(len(sys.argv)))):
+        # if 'local-rank' in sys.argv[i]:
+            # sys.argv[i] = sys.argv[i].replace('local-rank', 'local_rank')
+            # option_name, rank = sys.argv[i].split("=")
+            # sys.argv[i] = option_name
+            # sys.argv.insert(i+1, rank)
+            # break
+
+    
     module_path = sys.argv[1]
     module_parts = module_path.split(".")
+
     
     # 使用 sys.argv 的方式模仿命令行参数
-    backup_argv = sys.argv
     sys.argv = [module_path] + sys.argv[2:]  # 从 args 中删除模块名称，将其他参数前移
 
     try:
