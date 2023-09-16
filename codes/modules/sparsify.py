@@ -8,10 +8,12 @@ from .magic import MagicSynapse
 from torch.distributed import get_rank
 
 class Sparsify:
-    def __init__(self) -> None:
+    def __init__(self, model_type=Model, wrapper_type=Wrapper) -> None:
         self.activations = []
         self.mlps = []
         self.mlp_types = []
+        self.model_type = model_type
+        self.wrapper_type = wrapper_type
     
     def extract_linear_layers(self, mlp) -> 'dict[str, torch.nn.Linear]':
         pass
@@ -97,8 +99,8 @@ class Sparsify:
             model = MagicSynapse.plug_in(model=model, rho=rho, filter=self.magic_synapse_filter)
             print("MagicSynapse: Finished")
 
-        model = Model(
-            Wrapper(model),
+        model = self.model_type(
+            self.wrapper_type(model),
             RestrictAffinePlugin(log_per_step=log_per_step) if restricted_affine else None,
             ActivationDistributionPlugin(self.mlp_types, log_per_step),
             ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
@@ -111,7 +113,6 @@ class Sparsify:
         model.epoch = start_epoch
         model.losses = LossManager(writer=writer)
         start_tensorboard_server(writer.logdir)
-        output_dir = os.path.join(writer.logdir, 'save')
 
         if db_mlp and db_mlp_shape is None:
             # make parameters of dynamic modules of implicit adversarial samples ready
@@ -121,4 +122,4 @@ class Sparsify:
                 pred = model(X.to(device)[:physical_batch_size])
                 if hasattr(model, 'clean'):
                     model.clean()
-        return model, writer, output_dir
+        return model, writer, writer.logdir
