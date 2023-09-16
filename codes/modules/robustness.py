@@ -60,7 +60,7 @@ try:
             for module in self.main.modules():
                 if isinstance(module, ZerothBias):
                     module.clip()
-        def prepare(self, Y: torch.Tensor, labeled: torch.Tensor, D: torch.Tensor):
+        def prepare(self,X, Y: torch.Tensor, labeled: torch.Tensor, D: torch.Tensor):
             self._clip()
         def after_backward(self):
             with torch.no_grad():
