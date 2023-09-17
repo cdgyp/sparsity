@@ -78,7 +78,7 @@ from transformers import (
 from transformers.models.t5.modeling_t5 import T5LayerFF, T5DenseActDense
 from transformers.utils import send_example_telemetry
 
-from  ...base import LossManager
+from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
 from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
@@ -136,9 +136,10 @@ class TrainingArguments:
     )
     hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
     
-    resume:str = field(default=None, metadata={"help": "path to the checkpoint to be resumed"})
+    resume:str = field(default=None, metadata={"help": "Path to the checkpoint to be resumed"})
 
-    compile: bool = field(default=False, metadata={"help": "whether to use `torch.compile`. `torch` above 2.0 is required. "})
+    compile: bool = field(default=False, metadata={"help": "Whether to use `torch.compile`. `torch` above 2.0 is required. "})
+
 
     def __post_init__(self):
         if self.output_dir is not None:
@@ -317,15 +318,15 @@ class DataTrainingArguments:
                 extension = self.validation_file.split(".")[-1]
                 assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, a json or a txt file."
 
-def shift_tokens_right(input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int) -> torch.Tensor:
+def shift_tokens_right(input_ids: np.ndarray, pad_token_id: int, decoder_start_token_id: int) -> np.ndarray:
     """
     Shift input ids one token to the right.
     """
-    shifted_input_ids = torch.zeros_like(input_ids)
-    shifted_input_ids.at[:, 1:] = input_ids[:, :-1]
-    shifted_input_ids.at[:, 0] = decoder_start_token_id
+    shifted_input_ids = np.zeros_like(input_ids)
+    shifted_input_ids[:, 1:] = input_ids[:, :-1]
+    shifted_input_ids[:, 0] = decoder_start_token_id
 
-    shifted_input_ids = torch.where(shifted_input_ids == -100, pad_token_id, shifted_input_ids)
+    shifted_input_ids = np.where(shifted_input_ids == -100, pad_token_id, shifted_input_ids)
     return shifted_input_ids
 
 def compute_input_and_target_lengths(inputs_length, noise_density, mean_noise_span_length):
@@ -444,6 +445,10 @@ class DataCollatorForT5MLM:
             batch["labels"], self.pad_token_id, self.decoder_start_token_id
         )
 
+        for key in batch.keys():
+            assert isinstance(batch[key], np.ndarray), type(batch[key])
+            batch[key] = torch.tensor(batch[key])
+
         return batch
 
     def create_sentinel_ids(self, mask_indices):
@@ -541,9 +546,16 @@ class DataCollatorForT5MLM:
 
         return is_noise[:orig_length]
 
+class HfModel(Model):
+    def train_loss(self):
+        return self.main.train_loss()
+class HfWrapper(Wrapper):
+    def train_loss(self):
+        return self.model.train_loss()
+
 class T5Sparsify(Sparsify):
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(HfModel, HfWrapper)
         self.mlp_types = [T5DenseActDense]
 
     def extract_linear_layers(self, mlp: T5DenseActDense) -> 'dict[str, torch.nn.Linear]':
@@ -561,12 +573,12 @@ class T5Sparsify(Sparsify):
 
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
         for name, module in model.named_children():
-            p = '.'.join(path, name)
+            p = '.'.join([path, name])
             if isinstance(module, T5DenseActDense):
                 if jsrelu:
-                    setattr(model, 'act', ActivationPosition(JumpingSquaredReLU()))
+                    setattr(module, 'act', ActivationPosition(JumpingSquaredReLU()))
                 else:
-                    setattr(model, 'act', ActivationPosition(CustomizedReLU()))
+                    setattr(module, 'act', ActivationPosition(CustomizedReLU()))
                 
                 self.activations.append(p + ': ' + str(main.__class__))
             else:
@@ -582,14 +594,11 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         T5 = T5ForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             config=config,
-            torch_dtype=getattr(torch, model_args.dtype),
-            token=model_args.token,
         )
     else:
         config.vocab_size = len(tokenizer)
         T5 = T5ForConditionalGeneration(
             config,
-            torch_dtype=getattr(torch, model_args.dtype),
         )
 
     model, writer, output_dir = T5Sparsify()(
@@ -608,6 +617,8 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         resume=training_args.resume,
         device=get_rank() if 'RANK' in os.environ else 0
     )
+
+    model.config = T5.config
     training_args.output_dir = output_dir
     return model, writer
     
@@ -691,12 +702,19 @@ class CrossEntropyMetric(TbMetric):
 
 
 class LoggingCallback(TrainerCallback):
+    def __init__(self) -> None:
+        super().__init__()
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.epoch += 1
     def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.iteration += 1
+    
+    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs, **kwargs):
+        step_loss = logs['loss'] - self.total_loss
+        kwargs['model'].losses.observe(step_loss, 'train_loss')
+        self.total_loss = logs['loss']
         
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
@@ -705,7 +723,7 @@ class LoggingCallback(TrainerCallback):
         model.after_backward()
         losses: LossManager = model.losses
         losses.observe(optimizer.param_groups[0]["lr"], "lr")
-        losses.observe(model.train_loss, "loss")
+        # losses.observe(model.train_loss(), "loss")
         if model.iteration % args.logging_steps == 0:
             losses.log_losses(model.iteration)
         losses.reset()
@@ -720,6 +738,14 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         tr_loss =  super().training_step(model, inputs)
         model.train_loss = tr_loss
         return tr_loss
+
+
+class TokenizingFunction:
+    def __init__(self, tokenizer, text_column_name):
+        self.tokenizer = tokenizer
+        self.text_column_name = text_column_name
+    def __call__(self, examples):
+        return self.tokenizer(examples[self.text_column_name], return_attention_mask=False)
             
 
 def main():
@@ -745,6 +771,10 @@ def main():
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     # send_example_telemetry("run_t5_mlm", model_args, data_args, framework="flax")
+
+    _arg = Seq2SeqTrainingArguments(training_args.output_dir)
+
+    enable_full_determinism(seed=training_args.seed + _arg.local_rank)
 
     # Setup logging
     logging.basicConfig(
@@ -868,16 +898,19 @@ def main():
             cache_dir=model_args.cache_dir,
             vocab_size=len(tokenizer),
             token=model_args.token,
-
+            torch_dtype=getattr(torch, model_args.dtype),
         )
     elif model_args.model_name_or_path:
         config = T5Config.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
             token=model_args.token,
+            torch_dtype=getattr(torch, model_args.dtype),
         )
     else:
-        config = CONFIG_MAPPING[model_args.model_type]()
+        config = CONFIG_MAPPING[model_args.model_type](
+            torch_dtype=getattr(torch, model_args.dtype),
+        )
         logger.warning("You are instantiating a new config instance from scratch.")
 
     # Preprocessing the datasets.
@@ -892,9 +925,8 @@ def main():
 
     # Otherwise, we tokenize every text, then concatenate them together before splitting them in smaller parts.
     # Since we make sure that all sequences are of the same length, no attention_mask is needed.
-    def tokenize_function(examples):
-        return tokenizer(examples[text_column_name], return_attention_mask=False)
 
+    tokenize_function = TokenizingFunction(tokenizer=tokenizer, text_column_name=text_column_name)
     tokenized_datasets = datasets.map(
         tokenize_function,
         batched=True,
@@ -993,7 +1025,7 @@ def main():
         )
 
     trainer_argument = Seq2SeqTrainingArguments(
-        training_args.output_dir,
+        os.path.join(training_args.output_dir, 'save'),
         logging_dir=training_args.output_dir,
         overwrite_output_dir=True,
         do_train=training_args.do_train,
@@ -1006,24 +1038,25 @@ def main():
         logging_steps=training_args.logging_steps,
         per_device_eval_batch_size=training_args.per_device_eval_batch_size,
         per_device_train_batch_size=training_args.per_device_train_batch_size,
-        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+        gradient_accumulation_steps=training_args.gradient_accumulated_steps,
         learning_rate=training_args.learning_rate,
         weight_decay=training_args.weight_decay,
         **{key: value for key, value in training_args.to_dict().items() if 'adam' in key},
         max_grad_norm=1,
         num_train_epochs=training_args.num_train_epochs,
         max_steps=num_train_steps,
-        lr_scheduler_type=None,
-        warmup_ratio=None,
-        warmup_steps=None,
-        torch_compile=training_args.compile,
-        torch_compile_mode='reduce-overhead',
+        # lr_scheduler_type='constant',
+        # warmup_ratio=0,
+        # torch_compile=training_args.compile,
+        # torch_compile_mode='reduce-overhead',
+        remove_unused_columns=False,
         # reproducibility
         full_determinism=True,
         seed=training_args.seed + dist.get_rank(),
+        fp16=True, # open automatic mixed precision
     )
 
-    metric = CrossEntropyMetric(training_args.eval_step, writer=summary_writer)
+    metric = CrossEntropyMetric(training_args.eval_steps, writer=summary_writer)
 
     trainer = CustomSeq2SeqTrainer(
         model=model,
@@ -1031,11 +1064,11 @@ def main():
         data_collator=data_collator,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
-        optimizers=optimizer_scheduler,
         compute_metrics=metric.compute_metrics,
+        optimizers=optimizer_scheduler,
     )
 
-    trainer.add_callback()
+    trainer.add_callback(LoggingCallback())
     trainer.train(
         resume_from_checkpoint=training_args.resume
     )

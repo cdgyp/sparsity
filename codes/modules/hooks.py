@@ -531,8 +531,8 @@ class ActivationDistributionPlugin(HookingPlugin):
             
             if self.iteration % self.log_per_step == 0 or not self.training:
                 status = 'train' if self.training else 'test'
-                self.losses.observe(self.fall_within(pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_({status})', 'pre_activation', i)
-                self.losses.observe(self.fall_within(activations.flatten(), habitat['y']).mean(), f'activation_concentration_({status})', 'activation', i)
+                self.losses.observe(self.fall_within(pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_{status}', 'pre_activation', i)
+                self.losses.observe(self.fall_within(activations.flatten(), habitat['y']).mean(), f'activation_concentration_{status}', 'activation', i)
             h.clean()
             
     def is_hook_active(self):

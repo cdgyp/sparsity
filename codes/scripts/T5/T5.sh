@@ -14,28 +14,27 @@ do
     else
         extra=" "
     fi
-    torchrun --nproc_per_node=$n_visible_devices --rdzv_backend=c10d module_wrapper.py codes.scripts.T5.T5  \
+    torchrun --nproc_per_node $n_visible_devices --rdzv_backend=c10d module_wrapper.py codes.scripts.T5.T5  \
         --model_type                t5                      \
         --config_name               hf_caches/t5-base       \
         --tokenizer_name            hf_caches/t5-base       \
-        --dtype                     bfloat16    \
+        --dtype                     float32     \
         --overwrite_output_dir                  \
         --do_train                              \
         --do_eval                               \
         --per_device_train_batch_size   64      \
-        --per_device_eval_batch_size    1024    \
+        --per_device_eval_batch_size    128     \
         --gradient_accumulated_steps    1       \
         --max_steps                     1e5     \
         --learning_rate                 0.01    \
         --weight_decay                  0.001   \
         --warmup_steps                  10000   \
-        --logging_steps                 200     \
+        --logging_steps                 100     \
         --save_steps                    5000    \
-        --eval_steps                    2500    \
+        --eval_steps                    1000    \
         --from_disk                             \
         --dataset_name              'data/c4'   \
         --max_seq_length                512     \
-        --preprocessing_num_workers     8       \
         $extra                                  \
         "$@"
 done
