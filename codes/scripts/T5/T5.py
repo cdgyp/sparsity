@@ -42,7 +42,7 @@ from torch import distributed as dist
 # import jax.numpy as jnp
 import numpy as np
 # import optax
-from datasets import load_dataset, load_from_disk, DatasetDict
+from datasets import load_dataset, load_from_disk, DatasetDict, concatenate_datasets
 from transformers.trainer_callback import TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 # import evaluate
@@ -815,12 +815,22 @@ def main():
 
         if "validation" not in datasets.keys():
             if data_args.from_disk:
-                datasets["validation"] = load_from_disk(
-                    os.path.join(data_args.dataset_name, 'validation'),
-                )
-                datasets["train"] = load_from_disk(
-                    os.path.join(data_args.dataset_name, 'train'),
-                )
+                train_datasets = []
+                val_datasets = []
+                
+                for f in os.listdir(data_args.dataset_name):
+                    if os.path.isdir(os.path.join(data_args.dataset_name, f)) and ('train' in f or 'val' in f or 'test' in f):
+                        dataset = load_from_disk(
+                            os.path.join(data_args.dataset_name, f),
+                        )
+                        if 'train' in f:
+                            train_datasets.append(dataset)
+                        else:
+                            val_datasets.append(dataset)
+
+                    
+                datasets["validation"] = concatenate_datasets(val_datasets).shuffle(seed=42)
+                datasets["train"] = concatenate_datasets(train_datasets).shuffle(seed=42)
             else:
                 datasets["validation"] = load_dataset(
                     data_args.dataset_name,
