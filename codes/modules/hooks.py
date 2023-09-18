@@ -21,7 +21,7 @@ def _is_instance(obj, types):
     return False
 
 class ActivationHook(Hook):
-    def hook_on_all(vit, mlp_types, target_module_types, type=None):
+    def hook_on_all(vit, mlp_types, target_module_types, type=None, msg=None):
         hook_type = type if type is not None else ActivationHook
 
         res = []
@@ -39,6 +39,8 @@ class ActivationHook(Hook):
                     count += 1
                     h = hook_type()
                     h.hook_on(submodule)
+                    h.msg = msg
+                    h.index = count-1
                     res.append(h)
                     print(f'\t{rank}{name1}{name2}: {submodule.__class__}')
                     break
@@ -54,19 +56,26 @@ class ActivationMapHook(ForwardHook):
         self.pre_activations: torch.Tensor = None
         self.module = None
         self.active = False
+        self.gradient_checkpointing = False
     def __call__(self, module: nn.Module, input, output):
         if not self.active:
             return
+        if self.module is None:
+            self.module = ModuleReference(module)
         assert isinstance(output, torch.Tensor), output
         if self.activations is None:
             self.activations = []
         if self.pre_activations is None:
             self.pre_activations = []
-        self.activations.append(output.to_dense().float())
+        if self.gradient_checkpointing and (len(self.activations) > 0 or len(self.pre_activations) > 0):
+            return
+        
+        if output.is_sparse or output.is_sparse_csr:
+            self.activations.append(output.to_dense())
+        else:
+            self.activations.append(output)
         assert isinstance(input, tuple) and len(input) == 1
         self.pre_activations.append(input[0])
-        if self.module is None:
-            self.module = ModuleReference(module)
     def get(self):
         return torch.cat(self.activations, dim=0), torch.cat(self.pre_activations, dim=0)
     
@@ -74,8 +83,8 @@ class ActivationMapHook(ForwardHook):
         self.activations = None
         self.pre_activations = None
 
-    def hook_on_all(module: nn.Module, mlp_types):
-        return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=ActivationMapHook)
+    def hook_on_all(module: nn.Module, mlp_types, msg=None):
+        return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=ActivationMapHook, msg=msg)
 
 class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
@@ -94,8 +103,8 @@ class MlpGradientHook(BackwardHook):
         self.gradients.append(grad)
     def clean(self):
         self.gradients = None
-    def hook_on_all(module: nn.Module, mlp_types):
-        return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook)
+    def hook_on_all(module: nn.Module, mlp_types, msg=None):
+        return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook, msg=msg)
     def get(self):
         return torch.cat(self.gradients, dim=0)
     
@@ -252,6 +261,14 @@ class HookingPlugin(Plugin):
     def clean(self):
         for h in self.hooks:
             h.clean()
+    def gradient_checkpointing_enable(self):
+        for h in self.hooks:
+            if hasattr(h, 'gradient_checkpointing'):
+                h.gradient_checkpointing = True
+    def gradient_checkpointing_disable(self):
+        for h in self.hooks:
+            if hasattr(h, 'gradient_checkpointing'):
+                h.gradient_checkpointing = False
 
 class ActivationObservationPlugin(HookingPlugin):
     def __init__(self, mlp_types, extract_linear_layers, p=1, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False):
@@ -285,7 +302,6 @@ class ActivationObservationPlugin(HookingPlugin):
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
         self.gradient_hooks = MlpGradientHook.hook_on_all(main, self.mlp_types)
-        print(len(self.activation_hooks), len(self.gradient_hooks))
         self.main: BaseModule = ModuleReference(main)
     
     def forward(self, res: torch.Tensor, *args, **kwargs):
@@ -519,15 +535,15 @@ class ActivationDistributionPlugin(HookingPlugin):
     def fall_within(self, values: torch.Tensor, ranges: torch.Tensor):
         res = torch.zeros_like(values, dtype=torch.bool)
         for range in ranges:
-            res = res | ((range[0] <= values) & (values <= range[1]))
+            res = res.logical_or_((range[0] <= values) & (values <= range[1]))
         return res.float().mean()
     def do_logs(self):
         for i, h in enumerate(self.hooks):
             activations, pre_activations = h.get()
             habitat = h.module.get_habitat()
-            if self.training and self.iteration % (self.log_per_step * 100) == 0:
-                self.losses.histogram(activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
-                self.losses.histogram(pre_activations.flatten().clamp(min=habitat['view_x'][0, 0].item(), max=habitat['view_x'][0, 1].item()), 'pre_activation_distribution', i, bins=200)
+            # if self.training and self.iteration % (self.log_per_step * 100) == 0:
+                # self.losses.histogram(activations.flatten().clamp(min=habitat['view_y'][0, 0].item(), max=habitat['view_y'][0, 1].item()), 'activation_distribution', i, bins=200)
+                # self.losses.histogram(pre_activations.flatten().clamp(min=habitat['view_x'][0, 0].item(), max=habitat['view_x'][0, 1].item()), 'pre_activation_distribution', i, bins=200)
             
             if self.iteration % self.log_per_step == 0 or not self.training:
                 status = 'train' if self.training else 'test'
@@ -737,7 +753,7 @@ from torch.autograd.functional import jacobian
 class EffectiveGradientSparsity(MkkTPlugin):
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         super().register(main, plugins)
-        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
+        self.activation_hooks = ActivationMapHook.hook_on_all(main, self.mlp_types, 'EffectiveGradient')
     def prepare(self, *args, **kwargs):
         super().prepare(*args, **kwargs)
         for h in self.activation_hooks:
@@ -771,6 +787,16 @@ class EffectiveGradientSparsity(MkkTPlugin):
                 sum = (eta * selected).abs_().sum()
                 self.losses.observe(sign * sum, 'activation_effect', 'sum', name, i)
                 self.losses.observe(sign * sum /  count, 'activation_effect', 'average', name, i)
+    def gradient_checkpointing_enable(self):
+        super().gradient_checkpointing_enable()
+        for h in self.hooks:
+            if hasattr(h, 'gradient_checkpointing'):
+                h.gradient_checkpointing = True
+    def gradient_checkpointing_disable(self):
+        super().gradient_checkpointing_disable()
+        for h in self.hooks:
+            if hasattr(h, 'gradient_checkpointing'):
+                h.gradient_checkpointing = False
 
 
 class VGradientObservationPlugin(HookingPlugin):
@@ -782,7 +808,7 @@ class VGradientObservationPlugin(HookingPlugin):
         self.hooks: 'list[MlpGradientHook]' = None
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
-        self.hooks = MlpGradientHook.hook_on_all(main, mlp_types=self.mlp_types)
+        self.hooks = MlpGradientHook.hook_on_all(main, mlp_types=self.mlp_types, msg='VGradient')
 
     def after_minibatch_backward(self):
         if self.iteration % self.log_per_step == 0:

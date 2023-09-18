@@ -26,6 +26,8 @@ import os
 import sys
 import time
 import warnings
+from tensorboardX import SummaryWriter
+from functools import partial
 import torch
 from dataclasses import asdict, dataclass, field
 
@@ -33,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from torch import nn
 from torch import distributed as dist
 
@@ -53,6 +55,7 @@ from transformers.training_args import TrainingArguments
 from huggingface_hub import Repository, create_repo
 from tqdm import tqdm
 from torch.distributed import get_rank
+from random import shuffle
 
 from transformers import (
     CONFIG_MAPPING,
@@ -77,6 +80,8 @@ from transformers import (
 # from transformers.models.t5.modeling_flax_t5 import shift_tokens_right
 from transformers.models.t5.modeling_t5 import T5LayerFF, T5DenseActDense
 from transformers.utils import send_example_telemetry
+
+from codes.base.base import BaseModule, Plugin
 
 from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
 from ...modules.sparsify import Sparsify
@@ -412,9 +417,12 @@ class DataCollatorForT5MLM:
 
     def __call__(self, examples: List[Dict[str, np.ndarray]]) -> BatchEncoding:
         # convert list to dict and tensorize input
-        batch = BatchEncoding(
-            {k: np.array([examples[i][k] for i in range(len(examples))]) for k, v in examples[0].items()}
-        )
+        if not isinstance(examples, BatchEncoding):
+            batch = BatchEncoding(
+                {k: np.array([examples[i][k] for i in range(len(examples))]) for k, v in examples[0].items()}
+            )
+        else:
+            batch = examples
 
         input_ids = batch["input_ids"]
         batch_size, expandend_input_length = input_ids.shape
@@ -547,11 +555,30 @@ class DataCollatorForT5MLM:
         return is_noise[:orig_length]
 
 class HfModel(Model):
-    def train_loss(self):
-        return self.main.train_loss()
+    supports_gradient_checkpointing=True
+    def __init__(self, main: BaseModule, *plugins: Plugin, writer: SummaryWriter = None, identifier=None):
+        super().__init__(main, *plugins, writer=writer, identifier=identifier)
+        self.gradient_checkpointing = False
+    def gradient_checkpointing_enable(self):
+        self.main.gradient_checkpointing_enable()
+        for p in self.plugins:
+            if hasattr(p, 'gradient_checkpointing_enable'):
+                p.gradient_checkpointing_enable()
+    
+    def gradient_checkpointing_disable(self):
+        self.main.gradient_checkpointing_disable()
+        for p in self.plugins:
+            if hasattr(p, 'gradient_checkpointing_disable'):
+                p.gradient_checkpointing_disable()
 class HfWrapper(Wrapper):
-    def train_loss(self):
-        return self.model.train_loss()
+    supports_gradient_checkpointing=True
+    def __init__(self, model):
+        super().__init__(model)
+        self.gradient_checkpointing = False
+    def gradient_checkpointing_enable(self):
+        self.model.gradient_checkpointing_enable()
+    def gradient_checkpointing_disable(self):
+        self.model.gradient_checkpointing_disable()
 
 class T5Sparsify(Sparsify):
     def __init__(self) -> None:
@@ -615,7 +642,7 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         steps=0,
         start_epoch=0,
         resume=training_args.resume,
-        device=get_rank() if 'RANK' in os.environ else 0
+        device=int(os.environ['RANK']) if 'RANK' in os.environ else 0
     )
 
     model.config = T5.config
@@ -674,15 +701,20 @@ class TbMetric:
     def _compute(self, logits, labels):
         pass
     def compute_metrics(self, eval_preds):
+        preds, labels = eval_preds
+        return preds
+    def preprocess_logits_for_metrics(self, eval_preds, labels):
         self.count += 1
-        logits, labels = eval_preds
+        # logits, labels = eval_preds
+        logits = eval_preds[1]
         res = self._compute(logits=logits, labels=labels)
         self.writer.add_scalars(
             main_tag='eval_metrics',
             tag_scalar_dict=res,
             global_step= self.count * self.eval_steps
         )
-        return res
+        return res[next(iter(res.keys()))].mean()
+
 
 class CrossEntropyMetric(TbMetric):
     """
@@ -702,8 +734,6 @@ class CrossEntropyMetric(TbMetric):
 
 
 class LoggingCallback(TrainerCallback):
-    def __init__(self) -> None:
-        super().__init__()
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.epoch += 1
@@ -711,12 +741,7 @@ class LoggingCallback(TrainerCallback):
         model = kwargs['model']
         model.iteration += 1
     
-    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs, **kwargs):
-        step_loss = logs['loss'] - self.total_loss
-        kwargs['model'].losses.observe(step_loss, 'train_loss')
-        self.total_loss = logs['loss']
-        
-    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+    def on_substep_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         optimizer = kwargs['optimizer']
         model.after_minibatch_backward()
@@ -726,18 +751,29 @@ class LoggingCallback(TrainerCallback):
         # losses.observe(model.train_loss(), "loss")
         if model.iteration % args.logging_steps == 0:
             losses.log_losses(model.iteration)
+        model.clean()
         losses.reset()
+
+    def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        model.clean()
+
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.reset()
+    
 
 class CustomSeq2SeqTrainer(Seq2SeqTrainer):
     def training_step(self, model, inputs):
         tr_loss =  super().training_step(model, inputs)
         model.train_loss = tr_loss
         return tr_loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys = None, **gen_kwargs):
+        loss, logits, labels = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys, **gen_kwargs)
+        return loss, logits, inputs['labels']
 
 
 class TokenizingFunction:
@@ -746,7 +782,56 @@ class TokenizingFunction:
         self.text_column_name = text_column_name
     def __call__(self, examples):
         return self.tokenizer(examples[self.text_column_name], return_attention_mask=False)
-            
+
+def myshuffle(x):
+    np.random.shuffle(x)
+    return x
+
+
+
+class SequentialCollator:
+    def __init__(self, *collators) -> None:
+        self.collators = collators
+    def __call__(self, examples) -> Any:
+        for c in self.collators:
+            examples = c(examples)
+        return examples
+
+@dataclass
+class TextGroupCollator:
+    expanded_inputs_length: int
+    pad_token_id: int
+    def __call__(self, examples):
+        # Concatenate all texts.
+        n_samples = len(examples)
+        concatenated_examples = {
+            k: np.array(list(chain(*[examples[i][k] for i in range(len(examples))]))).flatten() for k in examples[0].keys()
+        }
+        
+        total_length = len(concatenated_examples[next(iter(examples[0].keys()))])
+        remainder = total_length % self.expanded_inputs_length
+        if remainder > 0:
+            padded_examples = {
+                k: np.pad(v, (0, self.expanded_inputs_length - remainder), mode='constant', constant_values=self.pad_token_id)
+                for k, v in concatenated_examples.items()
+            }
+        else:
+            padded_examples = concatenated_examples
+        
+        
+
+        ids = np.arange((total_length + self.expanded_inputs_length - remainder) // self.expanded_inputs_length)
+        np.random.shuffle(ids)
+        ids = ids[:n_samples, ...]
+        print(padded_examples[next(iter(examples[0].keys()))].reshape(-1, self.expanded_inputs_length).shape, ids, len(padded_examples), list(padded_examples.keys()))
+        def mydebug(x):
+            print(x.shape)
+            assert x.shape[0] >= ids.max()
+            return x
+        truncated_result = {
+            k: mydebug(v.reshape(-1, self.expanded_inputs_length))[ids, ...] for k, v in padded_examples.items()
+        }
+        return BatchEncoding(truncated_result)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -937,13 +1022,10 @@ def main():
     # Since we make sure that all sequences are of the same length, no attention_mask is needed.
 
     tokenize_function = TokenizingFunction(tokenizer=tokenizer, text_column_name=text_column_name)
-    tokenized_datasets = datasets.map(
-        tokenize_function,
-        batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=column_names,
-        load_from_cache_file=not data_args.overwrite_cache,
-    )
+    tokenized_datasets = datasets.with_transform(tokenize_function)
+
+
+
 
     # T5-like span masked language modeling will fuse consecutively masked tokens to a single sentinel token.
     # To ensure that the input length is `max_seq_length`, we need to increase the maximum length
@@ -956,20 +1038,6 @@ def main():
     print("expanded_inputs_length:", expanded_inputs_length, "targets_length:", targets_length)
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of expanded_inputs_length.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        if total_length >= expanded_inputs_length:
-            total_length = (total_length // expanded_inputs_length) * expanded_inputs_length
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + expanded_inputs_length] for i in range(0, total_length, expanded_inputs_length)]
-            for k, t in concatenated_examples.items()
-        }
-        return result
 
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a
     # remainder for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value
@@ -977,25 +1045,25 @@ def main():
     #
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
-    tokenized_datasets = tokenized_datasets.map(
-        group_texts,
-        batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        load_from_cache_file=not data_args.overwrite_cache,
-    )
 
     model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
 
     # Data collator
     # This one will take care of randomly masking the tokens.
-    data_collator = DataCollatorForT5MLM(
-        tokenizer=tokenizer,
-        noise_density=data_args.mlm_probability,
-        mean_noise_span_length=data_args.mean_noise_span_length,
-        input_length=max_seq_length,
-        target_length=targets_length,
-        pad_token_id=model.config.pad_token_id,
-        decoder_start_token_id=model.config.decoder_start_token_id,
+    data_collator = SequentialCollator(
+        TextGroupCollator(
+            expanded_inputs_length,
+            model.config.pad_token_id
+        ),
+        DataCollatorForT5MLM(
+            tokenizer=tokenizer,
+            noise_density=data_args.mlm_probability,
+            mean_noise_span_length=data_args.mean_noise_span_length,
+            input_length=max_seq_length,
+            target_length=targets_length,
+            pad_token_id=model.config.pad_token_id,
+            decoder_start_token_id=model.config.decoder_start_token_id,
+        )
     )
 
     # Store some constant
@@ -1064,6 +1132,10 @@ def main():
         full_determinism=True,
         seed=training_args.seed + dist.get_rank(),
         fp16=True, # open automatic mixed precision
+        dataloader_num_workers=16,
+        gradient_checkpointing=True,
+        ddp_find_unused_parameters=False,
+        eval_accumulation_steps=8
     )
 
     metric = CrossEntropyMetric(training_args.eval_steps, writer=summary_writer)
@@ -1075,6 +1147,7 @@ def main():
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
         compute_metrics=metric.compute_metrics,
+        preprocess_logits_for_metrics=metric.preprocess_logits_for_metrics,
         optimizers=optimizer_scheduler,
     )
 
