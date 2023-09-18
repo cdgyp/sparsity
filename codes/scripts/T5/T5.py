@@ -665,9 +665,9 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
     scheduler = get_inverse_sqrt_schedule(optimizer, num_warmup_steps=training_args.warmup_steps)
     return optimizer, scheduler
 
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 class TbMetric:
-    def __init__(self, eval_steps, writer: SummaryWriter) -> None:
+    def __init__(self, eval_steps, writer) -> None:
         self.writer = writer
         self.eval_steps = eval_steps
         self.count = 0
@@ -689,7 +689,7 @@ class CrossEntropyMetric(TbMetric):
         Directly using the training loss measured on testing samples. 
         Some strange perplexity.
     """
-    def __init__(self, eval_steps, writer: SummaryWriter) -> None:
+    def __init__(self, eval_steps, writer) -> None:
         super().__init__(eval_steps, writer)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
