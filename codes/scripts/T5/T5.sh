@@ -22,16 +22,18 @@ do
         --overwrite_output_dir                  \
         --do_train                              \
         --do_eval                               \
-        --per_device_train_batch_size   32      \
-        --per_device_eval_batch_size    32       \
-        --gradient_accumulated_steps    2       \
+        --per_device_train_batch_size_at_usual   64      \
+        --gradient_accumulated_steps_at_usual    1       \
+        --per_device_train_batch_size_at_logging   16      \
+        --gradient_accumulated_steps_at_logging    4       \
+        --per_device_eval_batch_size    96      \
         --max_steps                     1e5     \
         --learning_rate                 0.01    \
         --weight_decay                  0.001   \
         --warmup_steps                  10000   \
-        --logging_steps                 100     \
+        --logging_steps                 10     \
         --save_steps                    5000    \
-        --eval_steps                    1    \
+        --eval_steps                    100    \
         --from_disk                             \
         --dataset_name              'data/c4'   \
         --max_seq_length                512     \

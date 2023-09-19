@@ -87,6 +87,7 @@ from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
 from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
+from .subclasses import CustomSeq2SeqTrainer, CustomSeq2SeqTrainingArugment
 
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -111,14 +112,20 @@ class TrainingArguments:
     )
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=True, metadata={"help": "Whether to run eval on the dev set."})
-    per_device_train_batch_size: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training."}
+    per_device_train_batch_size_at_usual: int = field(
+        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when not logging."}
+    )
+    gradient_accumulated_steps_at_usual: int = field(
+        default=1
+    )
+    per_device_train_batch_size_at_logging: int = field(
+        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when logging."}
+    )
+    gradient_accumulated_steps_at_logging: int = field(
+        default=1
     )
     per_device_eval_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
-    )
-    gradient_accumulated_steps: int = field(
-        default=1
     )
     max_steps: float = field(default=100000, metadata={"help": 'Default value is the same as T5 training in "The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers".'})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
@@ -765,16 +772,6 @@ class LoggingCallback(TrainerCallback):
         model.losses.reset()
     
 
-class CustomSeq2SeqTrainer(Seq2SeqTrainer):
-    def training_step(self, model, inputs):
-        tr_loss =  super().training_step(model, inputs)
-        model.train_loss = tr_loss
-        return tr_loss
-
-    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys = None, **gen_kwargs):
-        loss, logits, labels = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys, **gen_kwargs)
-        return loss, logits, inputs['labels']
-
 
 class TokenizingFunction:
     def __init__(self, tokenizer, text_column_name):
@@ -815,22 +812,25 @@ class TextGroupCollator:
                 k: np.pad(v, (0, self.expanded_inputs_length - remainder), mode='constant', constant_values=self.pad_token_id)
                 for k, v in concatenated_examples.items()
             }
+            n_rows = (total_length + self.expanded_inputs_length - remainder) // self.expanded_inputs_length
         else:
             padded_examples = concatenated_examples
+            n_rows = total_length // self.expanded_inputs_length
+
         
         
 
-        ids = np.arange((total_length + self.expanded_inputs_length - remainder) // self.expanded_inputs_length)
-        np.random.shuffle(ids)
-        ids = ids[:n_samples, ...]
-        print(padded_examples[next(iter(examples[0].keys()))].reshape(-1, self.expanded_inputs_length).shape, ids, len(padded_examples), list(padded_examples.keys()))
-        def mydebug(x):
-            print(x.shape)
-            assert x.shape[0] >= ids.max()
-            return x
-        truncated_result = {
-            k: mydebug(v.reshape(-1, self.expanded_inputs_length))[ids, ...] for k, v in padded_examples.items()
-        }
+        if n_rows > n_samples:
+            ids = np.arange(n_rows)
+            np.random.shuffle(ids)
+            ids = ids[:n_samples]
+            truncated_result = {
+                k: v.reshape(-1, self.expanded_inputs_length)[ids] for k, v in padded_examples.items()
+            }
+        else:
+            truncated_result = {
+                k: v.reshape(-1, self.expanded_inputs_length) for k, v in padded_examples.items()
+            }
         return BatchEncoding(truncated_result)
 
 def main():
@@ -1068,7 +1068,7 @@ def main():
 
     # Store some constant
     num_epochs = int(training_args.num_train_epochs)
-    train_batch_size = int(training_args.per_device_train_batch_size) * torch.cuda.device_count()
+    train_batch_size = int(training_args.per_device_train_batch_size_at_usual) * torch.cuda.device_count()
     per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
     eval_batch_size = per_device_eval_batch_size * torch.cuda.device_count()
 
@@ -1102,7 +1102,7 @@ def main():
             "Use --overwrite_output_dir to overcome."
         )
 
-    trainer_argument = Seq2SeqTrainingArguments(
+    trainer_argument = CustomSeq2SeqTrainingArugment(
         os.path.join(training_args.output_dir, 'save'),
         logging_dir=training_args.output_dir,
         overwrite_output_dir=True,
@@ -1115,8 +1115,10 @@ def main():
         eval_steps=training_args.eval_steps,
         logging_steps=training_args.logging_steps,
         per_device_eval_batch_size=training_args.per_device_eval_batch_size,
-        per_device_train_batch_size=training_args.per_device_train_batch_size,
-        gradient_accumulation_steps=training_args.gradient_accumulated_steps,
+        per_device_train_batch_size_at_logging=training_args.per_device_train_batch_size_at_logging,
+        gradient_accumulation_steps_at_logging=training_args.gradient_accumulated_steps_at_logging,
+        per_device_train_batch_size_at_usual=training_args.per_device_train_batch_size_at_usual,
+        gradient_accumulation_steps_at_usual=training_args.gradient_accumulated_steps_at_usual,
         learning_rate=training_args.learning_rate,
         weight_decay=training_args.weight_decay,
         **{key: value for key, value in training_args.to_dict().items() if 'adam' in key},
@@ -1135,7 +1137,7 @@ def main():
         dataloader_num_workers=16,
         gradient_checkpointing=True,
         ddp_find_unused_parameters=False,
-        eval_accumulation_steps=8
+        eval_accumulation_steps=32
     )
 
     metric = CrossEntropyMetric(training_args.eval_steps, writer=summary_writer)

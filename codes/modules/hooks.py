@@ -86,6 +86,7 @@ class ActivationMapHook(ForwardHook):
     def hook_on_all(module: nn.Module, mlp_types, msg=None):
         return ActivationHook.hook_on_all(module, mlp_types, ActivationPosition, type=ActivationMapHook, msg=msg)
 
+
 class MlpGradientHook(BackwardHook):
     def __init__(self) -> None:
         super().__init__()
@@ -271,7 +272,7 @@ class HookingPlugin(Plugin):
                 h.gradient_checkpointing = False
 
 class ActivationObservationPlugin(HookingPlugin):
-    def __init__(self, mlp_types, extract_linear_layers, p=1, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False):
+    def __init__(self, mlp_types, extract_linear_layers, p=1, beta=0.9, batchwise_reported=False, log_per_step=1, pre_activation_only=False, gradient_checkpointing=False):
         super().__init__()
         self.activation_hooks: list[ActivationMapHook] = []
         self.gradient_hooks: list[MlpGradientHook] = []
@@ -789,12 +790,12 @@ class EffectiveGradientSparsity(MkkTPlugin):
                 self.losses.observe(sign * sum /  count, 'activation_effect', 'average', name, i)
     def gradient_checkpointing_enable(self):
         super().gradient_checkpointing_enable()
-        for h in self.hooks:
+        for h in self.activation_hooks:
             if hasattr(h, 'gradient_checkpointing'):
                 h.gradient_checkpointing = True
     def gradient_checkpointing_disable(self):
         super().gradient_checkpointing_disable()
-        for h in self.hooks:
+        for h in self.activation_hooks:
             if hasattr(h, 'gradient_checkpointing'):
                 h.gradient_checkpointing = False
 
