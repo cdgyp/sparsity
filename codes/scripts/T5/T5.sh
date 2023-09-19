@@ -31,9 +31,9 @@ do
         --learning_rate                 0.01    \
         --weight_decay                  0.001   \
         --warmup_steps                  10000   \
-        --logging_steps                 1     \
+        --logging_steps                 100     \
         --save_steps                    5000    \
-        --eval_steps                    1    \
+        --eval_steps                    2000    \
         --from_disk                             \
         --dataset_name              'data/c4'   \
         --max_seq_length                512     \
