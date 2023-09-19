@@ -1,4 +1,5 @@
 import os
+import gc
 import torch
 from torch import nn
 from codes.base import Plugin
@@ -21,6 +22,7 @@ def _is_instance(obj, types):
     return False
 
 class ActivationHook(Hook):
+    max_batch_size: int = 1024
     def hook_on_all(vit, mlp_types, target_module_types, type=None, msg=None):
         hook_type = type if type is not None else ActivationHook
 
@@ -41,6 +43,8 @@ class ActivationHook(Hook):
                     h.hook_on(submodule)
                     h.msg = msg
                     h.index = count-1
+                    if hasattr(h, 'max_batch_size'):
+                        h.max_batch_size = ActivationHook.max_batch_size
                     res.append(h)
                     print(f'\t{rank}{name1}{name2}: {submodule.__class__}')
                     break
@@ -57,6 +61,7 @@ class ActivationMapHook(ForwardHook):
         self.module = None
         self.active = False
         self.gradient_checkpointing = False
+        self.max_batch_size = 1024
     def __call__(self, module: nn.Module, input, output):
         if not self.active:
             return
@@ -70,12 +75,13 @@ class ActivationMapHook(ForwardHook):
         if self.gradient_checkpointing and (len(self.activations) > 0 or len(self.pre_activations) > 0):
             return
         
-        if output.is_sparse or output.is_sparse_csr:
-            self.activations.append(output.to_dense())
-        else:
-            self.activations.append(output)
-        assert isinstance(input, tuple) and len(input) == 1
-        self.pre_activations.append(input[0])
+        with torch.no_grad():
+            if output.is_sparse or output.is_sparse_csr:
+                self.activations.append(output[:self.max_batch_size].to_dense())
+            else:
+                self.activations.append(output[:self.max_batch_size])
+            assert isinstance(input, tuple) and len(input) == 1
+            self.pre_activations.append(input[0][:self.max_batch_size])
     def get(self):
         return torch.cat(self.activations, dim=0), torch.cat(self.pre_activations, dim=0)
     
@@ -92,6 +98,7 @@ class MlpGradientHook(BackwardHook):
         super().__init__()
         self.gradients: torch.Tensor = None
         self.active = False
+        self.max_batch_size = 1024
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
         if not self.active:
@@ -107,7 +114,7 @@ class MlpGradientHook(BackwardHook):
     def hook_on_all(module: nn.Module, mlp_types, msg=None):
         return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook, msg=msg)
     def get(self):
-        return torch.cat(self.gradients, dim=0)
+        return torch.cat([g[:self.max_batch_size] for g in self.gradients], dim=0)
     
 class GradientRecorder(BaseModule):
     def __init__(self, p=1, beta=0.9, label=''):
@@ -530,6 +537,7 @@ class ActivationDistributionPlugin(HookingPlugin):
         self.hooks: list[ActivationMapHook] = None
         self.mlp_types = mlp_types
         self.eps = eps
+        self.logged = False
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         self.main = ModuleReference(main)
         self.hooks = ActivationMapHook.hook_on_all(main, self.mlp_types)
@@ -539,6 +547,8 @@ class ActivationDistributionPlugin(HookingPlugin):
             res = res.logical_or_((range[0] <= values) & (values <= range[1]))
         return res.float().mean()
     def do_logs(self):
+        if self.logged:
+            return
         for i, h in enumerate(self.hooks):
             activations, pre_activations = h.get()
             habitat = h.module.get_habitat()
@@ -550,7 +560,21 @@ class ActivationDistributionPlugin(HookingPlugin):
                 status = 'train' if self.training else 'test'
                 self.losses.observe(self.fall_within(pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_{status}', 'pre_activation', i)
                 self.losses.observe(self.fall_within(activations.flatten(), habitat['y']).mean(), f'activation_concentration_{status}', 'activation', i)
+        self.logged = True
+        self.clean()
+        for h in self.hooks:
+            h.activations = [None]
+
+    def clean(self):
+        for h in self.hooks:
             h.clean()
+        self.logged = False
+        gc.collect()
+    def after_minibatch_backward(self, *args, **kwargs):
+        # When gradient checkpointing is used, we want the hooks not to record the activations in second forward propogation
+        # Therefore, we keep the activations and `logged` flag until minibatch backward. If it is cleaned as early as at the end of `forward()`, then activations will be registered again
+
+        self.clean()
             
     def is_hook_active(self):
         return not (self.iteration % self.log_per_step != 0 and self.training)
@@ -611,7 +635,7 @@ class MkkTPlugin(HookingPlugin):
             with torch.no_grad():
                 self.do_logs()
             self.clean()
-        
+
 class DiagonalityPlugin(MkkTPlugin):
     def single_log(self, name, p, i, sum_diagonals, sum_nondiagonals):
         self.losses.observe(sum_diagonals.mean(), f'verification_norm{p}_{name}', 'diagonals', i)

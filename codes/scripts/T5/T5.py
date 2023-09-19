@@ -115,18 +115,13 @@ class TrainingArguments:
     )
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=True, metadata={"help": "Whether to run eval on the dev set."})
-    per_device_train_batch_size_at_usual: int = field(
+    per_device_train_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when not logging."}
     )
-    gradient_accumulated_steps_at_usual: int = field(
+    gradient_accumulated_steps: int = field(
         default=1
     )
-    per_device_train_batch_size_at_logging: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when logging."}
-    )
-    gradient_accumulated_steps_at_logging: int = field(
-        default=1
-    )
+    max_obs_batch_size: int = field(default=1, metadata={"help": "Maximum size of batch size recorded by hooks."})
     per_device_eval_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
     )
@@ -155,6 +150,9 @@ class TrainingArguments:
     resume:str = field(default=None, metadata={"help": "Path to the checkpoint to be resumed"})
 
     compile: bool = field(default=False, metadata={"help": "Whether to use `torch.compile`. `torch` above 2.0 is required. "})
+
+
+    throw_empty_samples: bool = field(default=False)
 
 
     def __post_init__(self):
@@ -639,6 +637,9 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
             config,
         )
 
+    from ...modules.hooks import ActivationHook
+    ActivationHook.max_batch_size = training_args.max_obs_batch_size
+
     model, writer, output_dir = T5Sparsify()(
         'T5', training_args.title,
         T5,
@@ -653,7 +654,8 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         steps=0,
         start_epoch=0,
         resume=training_args.resume,
-        device=int(os.environ['RANK']) if 'RANK' in os.environ else 0
+        device=int(os.environ['RANK']) if 'RANK' in os.environ else 0,
+        tensorboard_server=False
     )
 
     model.config = T5.config
@@ -754,12 +756,14 @@ class LoggingCallback(TrainerCallback):
     def on_substep_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.after_minibatch_backward()
-        model.after_backward()
         # losses.observe(model.train_loss(), "loss")
         model.clean()
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
+        model.after_minibatch_backward()
+        model.after_backward()
+
         optimizer = kwargs['optimizer']
         losses: LossManager = model.losses
         losses.observe(optimizer.param_groups[0]["lr"], "lr")
@@ -775,7 +779,11 @@ class LoggingCallback(TrainerCallback):
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.writer.flush()
         model.losses.reset()
-    
+        model.clean()
+    def on_prediction_step(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        model.clean()
+        
 
 
 class TokenizingFunction:
@@ -1065,7 +1073,7 @@ def main():
 
     # Store some constant
     num_epochs = int(training_args.num_train_epochs)
-    train_batch_size = int(training_args.per_device_train_batch_size_at_usual) * torch.cuda.device_count()
+    train_batch_size = int(training_args.per_device_train_batch_size) * torch.cuda.device_count()
     per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
     eval_batch_size = per_device_eval_batch_size * torch.cuda.device_count()
 
@@ -1112,10 +1120,9 @@ def main():
         eval_steps=training_args.eval_steps,
         logging_steps=training_args.logging_steps,
         per_device_eval_batch_size=training_args.per_device_eval_batch_size,
-        per_device_train_batch_size_at_logging=training_args.per_device_train_batch_size_at_logging,
-        gradient_accumulation_steps_at_logging=training_args.gradient_accumulated_steps_at_logging,
-        per_device_train_batch_size_at_usual=training_args.per_device_train_batch_size_at_usual,
-        gradient_accumulation_steps_at_usual=training_args.gradient_accumulated_steps_at_usual,
+        per_device_train_batch_size=training_args.per_device_train_batch_size,
+        gradient_accumulation_steps=training_args.gradient_accumulated_steps,
+        max_obs_batch_size=training_args.max_obs_batch_size,
         learning_rate=training_args.learning_rate,
         weight_decay=training_args.weight_decay,
         **{key: value for key, value in training_args.to_dict().items() if 'adam' in key},
@@ -1124,8 +1131,6 @@ def main():
         max_steps=num_train_steps,
         # lr_scheduler_type='constant',
         # warmup_ratio=0,
-        # torch_compile=training_args.compile,
-        # torch_compile_mode='reduce-overhead',
         remove_unused_columns=False,
         # reproducibility
         full_determinism=True,
@@ -1134,7 +1139,10 @@ def main():
         dataloader_num_workers=16,
         gradient_checkpointing=True,
         ddp_find_unused_parameters=False,
-        eval_accumulation_steps=32
+        eval_accumulation_steps=32,
+        throw_empty_samples=training_args.throw_empty_samples
+        # torch_compile=training_args.compile,
+        # torch_compile_mode='reduce-overhead',
     )
 
     metric = CrossEntropyMetric(training_args.eval_steps, loss_manager=loss_manager)
@@ -1151,7 +1159,7 @@ def main():
     )
 
     trainer.add_callback(LoggingCallback())
-    logging.getLogger("tensorboard").setLevel(logging.ERROR)
+    logging.getLogger("tensorboard").setLevel(logging.WARNING)
     trainer.train(
         resume_from_checkpoint=training_args.resume
     )

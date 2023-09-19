@@ -156,24 +156,40 @@ else:
 
 @dataclass
 class CustomSeq2SeqTrainingArugment(Seq2SeqTrainingArguments):
-    per_device_train_batch_size_at_logging: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU/MPS/NPU core/CPU for training when logging."}
+    max_obs_batch_size: int = field(
+        default=8,
+        metadata={"help": "Maximum batch size during logging."}
     )
-    gradient_accumulation_steps_at_logging: int = field(
-        default=1,
-        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass when logging."},
-    )
-    per_device_train_batch_size_at_usual: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU/MPS/NPU core/CPU for training when not logging."}
-    )
-    gradient_accumulation_steps_at_usual: int = field(
-        default=1,
-        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass when not logging."},
+    throw_empty_samples: bool = field(
+        default=False
     )
 
 
 class CustomSeq2SeqTrainer(Seq2SeqTrainer):
+    def _throw_empty_samples(self, inputs):
+        pad_token_id = self.model.config.pad_token_id
+
+        input_ids = inputs['input_ids']
+        assert len(input_ids.shape) == 2
+        heads = input_ids[:, 0]
+
+        n_empty = 0
+        for i in reversed(range(len(heads))):
+            if heads[i] == pad_token_id:
+                n_empty += 1
+            else:
+                break
+        n_reserved = len(heads) - n_empty
+        return {
+            k: v[:n_reserved]
+            for k, v in inputs.items()
+        }
+
     def training_step(self, model, inputs):
+        if self.args.throw_empty_samples:
+            inputs = self._throw_empty_samples(inputs)
+        else:
+            inputs = inputs
         tr_loss =  super().training_step(model, inputs)
         model.train_loss = tr_loss
         return tr_loss
@@ -182,14 +198,13 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         loss, logits, labels = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys, **gen_kwargs)
         return loss, logits, inputs['labels']
 
-    def _on_begin_of_step(self):
+    def _on_begin_of_step(self, inputs):
         if self.model.iteration % self.args.logging_steps == 0:
-            self.args.per_device_train_batch_size = self.args.per_device_train_batch_size_at_logging
-            self.args.gradient_accumulation_steps = self.args.gradient_accumulation_steps_at_logging
+            return {
+                k: v[:self.args.max_obs_batch_size] for k, v in inputs.items()
+            }
         else:
-            self.args.per_device_train_batch_size = self.args.per_device_train_batch_size_at_usual
-            self.args.gradient_accumulation_steps = self.args.gradient_accumulation_steps_at_usual
-
+            return inputs
     
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -446,7 +461,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             step = -1
             for step, inputs in enumerate(epoch_iterator):
                 total_batched_samples += 1
-                self._on_begin_of_step()
                 if rng_to_sync:
                     self._load_rng_state(resume_from_checkpoint)
                     rng_to_sync = False
@@ -465,6 +479,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
+                
+                inputs = self._on_begin_of_step(inputs)
 
                 with self.accelerator.accumulate(model):
                     tr_loss_step = self.training_step(model, inputs)
