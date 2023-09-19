@@ -81,6 +81,8 @@ from transformers import (
 from transformers.models.t5.modeling_t5 import T5LayerFF, T5DenseActDense
 from transformers.utils import send_example_telemetry
 
+import logging
+
 from codes.base.base import BaseModule, Plugin
 
 from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
@@ -751,25 +753,27 @@ class LoggingCallback(TrainerCallback):
     
     def on_substep_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
-        optimizer = kwargs['optimizer']
         model.after_minibatch_backward()
         model.after_backward()
-        losses: LossManager = model.losses
-        losses.observe(optimizer.param_groups[0]["lr"], "lr")
         # losses.observe(model.train_loss(), "loss")
-        if model.iteration % args.logging_steps == 0:
-            losses.log_losses(model.iteration)
         model.clean()
-        losses.reset()
 
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
+        optimizer = kwargs['optimizer']
+        losses: LossManager = model.losses
+        losses.observe(optimizer.param_groups[0]["lr"], "lr")
+        if model.iteration % args.logging_steps == 0:
+            losses.log_losses(model.iteration, True)
+            losses.writer.flush()
+        losses.reset()
         model.clean()
 
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.losses.log_losses(model.iteration, testing=True)
+        model.losses.writer.flush()
         model.losses.reset()
     
 
@@ -1126,7 +1130,7 @@ def main():
         # reproducibility
         full_determinism=True,
         seed=training_args.seed + dist.get_rank(),
-        fp16=True, # open automatic mixed precision
+        # fp16=True, # open automatic mixed precision
         dataloader_num_workers=16,
         gradient_checkpointing=True,
         ddp_find_unused_parameters=False,
@@ -1147,6 +1151,7 @@ def main():
     )
 
     trainer.add_callback(LoggingCallback())
+    logging.getLogger("tensorboard").setLevel(logging.ERROR)
     trainer.train(
         resume_from_checkpoint=training_args.resume
     )
