@@ -36,6 +36,7 @@ do
         --from_disk                             \
         --dataset_name              'data/c4'   \
         --max_seq_length                512     \
+        --gradient_checkpointing                \
         $extra                                  \
         "$@"
 done

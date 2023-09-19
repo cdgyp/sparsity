@@ -151,8 +151,9 @@ class TrainingArguments:
 
     compile: bool = field(default=False, metadata={"help": "Whether to use `torch.compile`. `torch` above 2.0 is required. "})
 
-
     throw_empty_samples: bool = field(default=False)
+
+    gradient_checkpointing: bool = field(default=False)
 
 
     def __post_init__(self):
@@ -1137,7 +1138,7 @@ def main():
         seed=training_args.seed + dist.get_rank(),
         # fp16=True, # open automatic mixed precision
         dataloader_num_workers=16,
-        gradient_checkpointing=True,
+        gradient_checkpointing=training_args.gradient_checkpointing,
         ddp_find_unused_parameters=False,
         eval_accumulation_steps=32,
         throw_empty_samples=training_args.throw_empty_samples
