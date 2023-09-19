@@ -31,7 +31,7 @@ do
         --learning_rate                 0.01    \
         --weight_decay                  0.001   \
         --warmup_steps                  10000   \
-        --logging_steps                 100     \
+        --logging_steps                 50     \
         --save_steps                    5000    \
         --eval_steps                    2000    \
         --from_disk                             \
