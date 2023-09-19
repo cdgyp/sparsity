@@ -88,6 +88,7 @@ from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
 from .subclasses import CustomSeq2SeqTrainer, CustomSeq2SeqTrainingArugment
+from .data import get_eval_dataset
 
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -128,6 +129,7 @@ class TrainingArguments:
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
     )
     max_steps: float = field(default=100000, metadata={"help": 'Default value is the same as T5 training in "The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers".'})
+    max_eval_samples: int = field(default=100000, metadata={"help": "The maximum number of evaluation samples. If the provided evaluation dataset is larger than this number, a random subset will be selected."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
     adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
@@ -701,8 +703,8 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
 
 # from torch.utils.tensorboard import SummaryWriter
 class TbMetric:
-    def __init__(self, eval_steps, writer) -> None:
-        self.writer = writer
+    def __init__(self, eval_steps, loss_manager: LossManager) -> None:
+        self.loss_manager = loss_manager
         self.eval_steps = eval_steps
         self.count = 0
     def _compute(self, logits, labels):
@@ -715,11 +717,8 @@ class TbMetric:
         # logits, labels = eval_preds
         logits = eval_preds[1]
         res = self._compute(logits=logits, labels=labels)
-        self.writer.add_scalars(
-            main_tag='eval_metrics',
-            tag_scalar_dict=res,
-            global_step= self.count * self.eval_steps
-        )
+        for key, value in res.items():
+            self.loss_manager.observe(value, 'eval_metrics', key)
         return res[next(iter(res.keys()))].mean()
 
 
@@ -728,8 +727,8 @@ class CrossEntropyMetric(TbMetric):
         Directly using the training loss measured on testing samples. 
         Some strange perplexity.
     """
-    def __init__(self, eval_steps, writer) -> None:
-        super().__init__(eval_steps, writer)
+    def __init__(self, eval_steps, loss_manager) -> None:
+        super().__init__(eval_steps, loss_manager)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     def _compute(self, logits, labels):
@@ -806,32 +805,21 @@ class TextGroupCollator:
         }
         
         total_length = len(concatenated_examples[next(iter(examples[0].keys()))])
-        remainder = total_length % self.expanded_inputs_length
-        if remainder > 0:
+        if total_length < self.expanded_inputs_length * n_samples:
             padded_examples = {
-                k: np.pad(v, (0, self.expanded_inputs_length - remainder), mode='constant', constant_values=self.pad_token_id)
+                k: np.pad(v, (0, self.expanded_inputs_length * n_samples - total_length), mode='constant', constant_values=self.pad_token_id)
                 for k, v in concatenated_examples.items()
             }
-            n_rows = (total_length + self.expanded_inputs_length - remainder) // self.expanded_inputs_length
         else:
-            padded_examples = concatenated_examples
-            n_rows = total_length // self.expanded_inputs_length
-
-        
-        
-
-        if n_rows > n_samples:
-            ids = np.arange(n_rows)
-            np.random.shuffle(ids)
-            ids = ids[:n_samples]
-            truncated_result = {
-                k: v.reshape(-1, self.expanded_inputs_length)[ids] for k, v in padded_examples.items()
+            padded_examples = {
+                k: v[:self.expanded_inputs_length * n_samples]
+                for k, v in concatenated_examples.items()
             }
-        else:
-            truncated_result = {
-                k: v.reshape(-1, self.expanded_inputs_length) for k, v in padded_examples.items()
+
+        reshaped_result = {
+                k: v.reshape(n_samples, self.expanded_inputs_length) for k, v in padded_examples.items()
             }
-        return BatchEncoding(truncated_result)
+        return BatchEncoding(reshaped_result)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -910,7 +898,7 @@ def main():
                         )
                         if 'train' in f:
                             train_datasets.append(dataset)
-                        else:
+                        else:# if '0' in f:
                             val_datasets.append(dataset)
 
                     
@@ -1024,6 +1012,8 @@ def main():
     tokenize_function = TokenizingFunction(tokenizer=tokenizer, text_column_name=text_column_name)
     tokenized_datasets = datasets.with_transform(tokenize_function)
 
+    # tokenized_datasets["validation"] = get_eval_dataset(tokenized_datasets["validation"], training_args.max_eval_samples) 
+
 
 
 
@@ -1047,6 +1037,7 @@ def main():
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
     model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
+    loss_manager = model.losses
 
     # Data collator
     # This one will take care of randomly masking the tokens.
@@ -1140,7 +1131,7 @@ def main():
         eval_accumulation_steps=32
     )
 
-    metric = CrossEntropyMetric(training_args.eval_steps, writer=summary_writer)
+    metric = CrossEntropyMetric(training_args.eval_steps, loss_manager=loss_manager)
 
     trainer = CustomSeq2SeqTrainer(
         model=model,

@@ -157,18 +157,18 @@ else:
 @dataclass
 class CustomSeq2SeqTrainingArugment(Seq2SeqTrainingArguments):
     per_device_train_batch_size_at_logging: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU/MPS/NPU core/CPU for training."}
+        default=8, metadata={"help": "Batch size per GPU/TPU/MPS/NPU core/CPU for training when logging."}
     )
     gradient_accumulation_steps_at_logging: int = field(
         default=1,
-        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass."},
+        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass when logging."},
     )
     per_device_train_batch_size_at_usual: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU/MPS/NPU core/CPU for training."}
+        default=8, metadata={"help": "Batch size per GPU/TPU/MPS/NPU core/CPU for training when not logging."}
     )
     gradient_accumulation_steps_at_usual: int = field(
         default=1,
-        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass."},
+        metadata={"help": "Number of updates steps to accumulate before performing a backward/update pass when not logging."},
     )
 
 
