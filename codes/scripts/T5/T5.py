@@ -711,7 +711,9 @@ class TbMetric:
         pass
     def compute_metrics(self, eval_preds):
         preds, labels = eval_preds
-        return preds
+        return {
+            "loss": preds.mean()
+        }
     def preprocess_logits_for_metrics(self, eval_preds, labels):
         self.count += 1
         # logits, labels = eval_preds
@@ -898,7 +900,7 @@ def main():
                         )
                         if 'train' in f:
                             train_datasets.append(dataset)
-                        else:# if '0' in f:
+                        else:
                             val_datasets.append(dataset)
 
                     
