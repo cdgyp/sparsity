@@ -18,15 +18,25 @@ class Sparsify:
     def extract_linear_layers(self, mlp) -> 'dict[str, torch.nn.Linear]':
         pass
 
+    def activation_function_filter(self, path, name, module):
+        return isinstance(module, torch.nn.ReLU)
+
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
+        if isinstance(jsrelu, str):
+            jsrelu = (jsrelu.lower() == 'jsrelu' or jsrelu.lower() == 'jumpring_squared_relu')
+        if isinstance(jsrelu, bool):
+            if jsrelu:
+                make_act = lambda: ActivationPosition(JumpingSquaredReLU())
+            else:
+                make_act = lambda: ActivationPosition(CustomizedReLU())
+        else:
+            make_act = jsrelu
+            
+        
         for name, module in model.named_children():
             p = '.'.join([path, name])
-            if isinstance(module, torch.nn.ReLU):
-                if jsrelu:
-                    setattr(model, name, ActivationPosition(JumpingSquaredReLU()))
-                else:
-                    setattr(model, name, ActivationPosition(CustomizedReLU()))
-                self.activations.append(p + ': ' + str(module.__class__))
+            if self.activation_function_filter(path, name, module):
+                setattr(model, name, make_act())
             else:
                 self.replace_activations(module, jsrelu=jsrelu, path=p)
         return model
