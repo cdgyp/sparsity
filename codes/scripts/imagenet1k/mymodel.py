@@ -32,6 +32,8 @@ class ImageNet1kSparsify(Sparsify):
         return '.mlp.' in name
 
 def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1):
+    if model_type not in ['vanilla', 'sparsified']:
+        raise NotImplemented(model_type)
     sparsified = (model_type == 'sparsified')
     
     if sparsified:
