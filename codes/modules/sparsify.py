@@ -67,6 +67,7 @@ class Sparsify:
         resume=None,
         dataloader=None,
         physical_batch_size=None,
+        tensorboard_server=True,
     ):
         if restricted_affine is None:
             restricted_affine = db_mlp
@@ -112,7 +113,8 @@ class Sparsify:
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
         model.epoch = start_epoch
         model.losses = LossManager(writer=writer)
-        start_tensorboard_server(writer.logdir)
+        if tensorboard_server:
+            start_tensorboard_server(writer.logdir)
 
         if db_mlp and db_mlp_shape is None:
             # make parameters of dynamic modules of implicit adversarial samples ready

@@ -26,6 +26,8 @@ import os
 import sys
 import time
 import warnings
+from tensorboardX import SummaryWriter
+from functools import partial
 import torch
 from dataclasses import asdict, dataclass, field
 
@@ -33,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from torch import nn
 from torch import distributed as dist
 
@@ -42,7 +44,7 @@ from torch import distributed as dist
 # import jax.numpy as jnp
 import numpy as np
 # import optax
-from datasets import load_dataset, load_from_disk, DatasetDict
+from datasets import load_dataset, load_from_disk, DatasetDict, concatenate_datasets
 from transformers.trainer_callback import TrainerControl, TrainerState
 from transformers.training_args import TrainingArguments
 # import evaluate
@@ -53,6 +55,7 @@ from transformers.training_args import TrainingArguments
 from huggingface_hub import Repository, create_repo
 from tqdm import tqdm
 from torch.distributed import get_rank
+from random import shuffle
 
 from transformers import (
     CONFIG_MAPPING,
@@ -78,10 +81,16 @@ from transformers import (
 from transformers.models.t5.modeling_t5 import T5LayerFF, T5DenseActDense
 from transformers.utils import send_example_telemetry
 
+import logging
+
+from codes.base.base import BaseModule, Plugin
+
 from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
 from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
+from .subclasses import CustomSeq2SeqTrainer, CustomSeq2SeqTrainingArugment
+from .data import get_eval_dataset
 
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -107,15 +116,17 @@ class TrainingArguments:
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=True, metadata={"help": "Whether to run eval on the dev set."})
     per_device_train_batch_size: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training."}
-    )
-    per_device_eval_batch_size: int = field(
-        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
+        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when not logging."}
     )
     gradient_accumulated_steps: int = field(
         default=1
     )
+    max_obs_batch_size: int = field(default=1, metadata={"help": "Maximum size of batch size recorded by hooks."})
+    per_device_eval_batch_size: int = field(
+        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
+    )
     max_steps: float = field(default=100000, metadata={"help": 'Default value is the same as T5 training in "The Lazy Neuron Phenomenon: On Emergence of Activation Sparsity in Transformers".'})
+    max_eval_samples: int = field(default=100000, metadata={"help": "The maximum number of evaluation samples. If the provided evaluation dataset is larger than this number, a random subset will be selected."})
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
     adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
@@ -139,6 +150,10 @@ class TrainingArguments:
     resume:str = field(default=None, metadata={"help": "Path to the checkpoint to be resumed"})
 
     compile: bool = field(default=False, metadata={"help": "Whether to use `torch.compile`. `torch` above 2.0 is required. "})
+
+    throw_empty_samples: bool = field(default=False)
+
+    gradient_checkpointing: bool = field(default=False)
 
 
     def __post_init__(self):
@@ -412,9 +427,12 @@ class DataCollatorForT5MLM:
 
     def __call__(self, examples: List[Dict[str, np.ndarray]]) -> BatchEncoding:
         # convert list to dict and tensorize input
-        batch = BatchEncoding(
-            {k: np.array([examples[i][k] for i in range(len(examples))]) for k, v in examples[0].items()}
-        )
+        if not isinstance(examples, BatchEncoding):
+            batch = BatchEncoding(
+                {k: np.array([examples[i][k] for i in range(len(examples))]) for k, v in examples[0].items()}
+            )
+        else:
+            batch = examples
 
         input_ids = batch["input_ids"]
         batch_size, expandend_input_length = input_ids.shape
@@ -547,11 +565,30 @@ class DataCollatorForT5MLM:
         return is_noise[:orig_length]
 
 class HfModel(Model):
-    def train_loss(self):
-        return self.main.train_loss()
+    supports_gradient_checkpointing=True
+    def __init__(self, main: BaseModule, *plugins: Plugin, writer: SummaryWriter = None, identifier=None):
+        super().__init__(main, *plugins, writer=writer, identifier=identifier)
+        self.gradient_checkpointing = False
+    def gradient_checkpointing_enable(self):
+        self.main.gradient_checkpointing_enable()
+        for p in self.plugins:
+            if hasattr(p, 'gradient_checkpointing_enable'):
+                p.gradient_checkpointing_enable()
+    
+    def gradient_checkpointing_disable(self):
+        self.main.gradient_checkpointing_disable()
+        for p in self.plugins:
+            if hasattr(p, 'gradient_checkpointing_disable'):
+                p.gradient_checkpointing_disable()
 class HfWrapper(Wrapper):
-    def train_loss(self):
-        return self.model.train_loss()
+    supports_gradient_checkpointing=True
+    def __init__(self, model):
+        super().__init__(model)
+        self.gradient_checkpointing = False
+    def gradient_checkpointing_enable(self):
+        self.model.gradient_checkpointing_enable()
+    def gradient_checkpointing_disable(self):
+        self.model.gradient_checkpointing_disable()
 
 class T5Sparsify(Sparsify):
     def __init__(self) -> None:
@@ -601,6 +638,9 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
             config,
         )
 
+    from ...modules.hooks import ActivationHook
+    ActivationHook.max_batch_size = training_args.max_obs_batch_size
+
     model, writer, output_dir = T5Sparsify()(
         'T5', training_args.title,
         T5,
@@ -615,7 +655,8 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         steps=0,
         start_epoch=0,
         resume=training_args.resume,
-        device=get_rank() if 'RANK' in os.environ else 0
+        device=int(os.environ['RANK']) if 'RANK' in os.environ else 0,
+        tensorboard_server=False
     )
 
     model.config = T5.config
@@ -665,32 +706,36 @@ def get_optimizer_scheduler(model: torch.nn.Module, training_args: TrainingArgum
     scheduler = get_inverse_sqrt_schedule(optimizer, num_warmup_steps=training_args.warmup_steps)
     return optimizer, scheduler
 
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 class TbMetric:
-    def __init__(self, eval_steps, writer: SummaryWriter) -> None:
-        self.writer = writer
+    def __init__(self, eval_steps, loss_manager: LossManager) -> None:
+        self.loss_manager = loss_manager
         self.eval_steps = eval_steps
         self.count = 0
     def _compute(self, logits, labels):
         pass
     def compute_metrics(self, eval_preds):
+        preds, labels = eval_preds
+        return {
+            "loss": preds.mean()
+        }
+    def preprocess_logits_for_metrics(self, eval_preds, labels):
         self.count += 1
-        logits, labels = eval_preds
+        # logits, labels = eval_preds
+        logits = eval_preds[1]
         res = self._compute(logits=logits, labels=labels)
-        self.writer.add_scalars(
-            main_tag='eval_metrics',
-            tag_scalar_dict=res,
-            global_step= self.count * self.eval_steps
-        )
-        return res
+        for key, value in res.items():
+            self.loss_manager.observe(value, 'eval_metrics', key)
+        return res[next(iter(res.keys()))].mean()
+
 
 class CrossEntropyMetric(TbMetric):
     """
         Directly using the training loss measured on testing samples. 
         Some strange perplexity.
     """
-    def __init__(self, eval_steps, writer: SummaryWriter) -> None:
-        super().__init__(eval_steps, writer)
+    def __init__(self, eval_steps, loss_manager) -> None:
+        super().__init__(eval_steps, loss_manager)
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     def _compute(self, logits, labels):
@@ -702,8 +747,6 @@ class CrossEntropyMetric(TbMetric):
 
 
 class LoggingCallback(TrainerCallback):
-    def __init__(self) -> None:
-        super().__init__()
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.epoch += 1
@@ -711,33 +754,37 @@ class LoggingCallback(TrainerCallback):
         model = kwargs['model']
         model.iteration += 1
     
-    def on_log(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, logs, **kwargs):
-        step_loss = logs['loss'] - self.total_loss
-        kwargs['model'].losses.observe(step_loss, 'train_loss')
-        self.total_loss = logs['loss']
-        
+    def on_substep_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        model.after_minibatch_backward()
+        # losses.observe(model.train_loss(), "loss")
+        model.clean()
+
     def on_step_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
-        optimizer = kwargs['optimizer']
         model.after_minibatch_backward()
         model.after_backward()
+
+        optimizer = kwargs['optimizer']
         losses: LossManager = model.losses
         losses.observe(optimizer.param_groups[0]["lr"], "lr")
-        # losses.observe(model.train_loss(), "loss")
         if model.iteration % args.logging_steps == 0:
-            losses.log_losses(model.iteration)
+            losses.log_losses(model.iteration, True)
+            losses.writer.flush()
         losses.reset()
+        model.clean()
+
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.losses.log_losses(model.iteration, testing=True)
+        model.losses.writer.flush()
         model.losses.reset()
-
-class CustomSeq2SeqTrainer(Seq2SeqTrainer):
-    def training_step(self, model, inputs):
-        tr_loss =  super().training_step(model, inputs)
-        model.train_loss = tr_loss
-        return tr_loss
+        model.clean()
+    def on_prediction_step(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        model = kwargs['model']
+        model.clean()
+        
 
 
 class TokenizingFunction:
@@ -746,7 +793,48 @@ class TokenizingFunction:
         self.text_column_name = text_column_name
     def __call__(self, examples):
         return self.tokenizer(examples[self.text_column_name], return_attention_mask=False)
-            
+
+def myshuffle(x):
+    np.random.shuffle(x)
+    return x
+
+
+
+class SequentialCollator:
+    def __init__(self, *collators) -> None:
+        self.collators = collators
+    def __call__(self, examples) -> Any:
+        for c in self.collators:
+            examples = c(examples)
+        return examples
+
+@dataclass
+class TextGroupCollator:
+    expanded_inputs_length: int
+    pad_token_id: int
+    def __call__(self, examples):
+        # Concatenate all texts.
+        n_samples = len(examples)
+        concatenated_examples = {
+            k: np.array(list(chain(*[examples[i][k] for i in range(len(examples))]))).flatten() for k in examples[0].keys()
+        }
+        
+        total_length = len(concatenated_examples[next(iter(examples[0].keys()))])
+        if total_length < self.expanded_inputs_length * n_samples:
+            padded_examples = {
+                k: np.pad(v, (0, self.expanded_inputs_length * n_samples - total_length), mode='constant', constant_values=self.pad_token_id)
+                for k, v in concatenated_examples.items()
+            }
+        else:
+            padded_examples = {
+                k: v[:self.expanded_inputs_length * n_samples]
+                for k, v in concatenated_examples.items()
+            }
+
+        reshaped_result = {
+                k: v.reshape(n_samples, self.expanded_inputs_length) for k, v in padded_examples.items()
+            }
+        return BatchEncoding(reshaped_result)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -815,12 +903,22 @@ def main():
 
         if "validation" not in datasets.keys():
             if data_args.from_disk:
-                datasets["validation"] = load_from_disk(
-                    os.path.join(data_args.dataset_name, 'validation'),
-                )
-                datasets["train"] = load_from_disk(
-                    os.path.join(data_args.dataset_name, 'train'),
-                )
+                train_datasets = []
+                val_datasets = []
+                
+                for f in os.listdir(data_args.dataset_name):
+                    if os.path.isdir(os.path.join(data_args.dataset_name, f)) and ('train' in f or 'val' in f or 'test' in f):
+                        dataset = load_from_disk(
+                            os.path.join(data_args.dataset_name, f),
+                        )
+                        if 'train' in f:
+                            train_datasets.append(dataset)
+                        else:
+                            val_datasets.append(dataset)
+
+                    
+                datasets["validation"] = concatenate_datasets(val_datasets).shuffle(seed=42)
+                datasets["train"] = concatenate_datasets(train_datasets).shuffle(seed=42)
             else:
                 datasets["validation"] = load_dataset(
                     data_args.dataset_name,
@@ -927,13 +1025,12 @@ def main():
     # Since we make sure that all sequences are of the same length, no attention_mask is needed.
 
     tokenize_function = TokenizingFunction(tokenizer=tokenizer, text_column_name=text_column_name)
-    tokenized_datasets = datasets.map(
-        tokenize_function,
-        batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=column_names,
-        load_from_cache_file=not data_args.overwrite_cache,
-    )
+    tokenized_datasets = datasets.with_transform(tokenize_function)
+
+    # tokenized_datasets["validation"] = get_eval_dataset(tokenized_datasets["validation"], training_args.max_eval_samples) 
+
+
+
 
     # T5-like span masked language modeling will fuse consecutively masked tokens to a single sentinel token.
     # To ensure that the input length is `max_seq_length`, we need to increase the maximum length
@@ -946,20 +1043,6 @@ def main():
     print("expanded_inputs_length:", expanded_inputs_length, "targets_length:", targets_length)
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of expanded_inputs_length.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        if total_length >= expanded_inputs_length:
-            total_length = (total_length // expanded_inputs_length) * expanded_inputs_length
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + expanded_inputs_length] for i in range(0, total_length, expanded_inputs_length)]
-            for k, t in concatenated_examples.items()
-        }
-        return result
 
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a
     # remainder for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value
@@ -967,25 +1050,26 @@ def main():
     #
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
-    tokenized_datasets = tokenized_datasets.map(
-        group_texts,
-        batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        load_from_cache_file=not data_args.overwrite_cache,
-    )
 
     model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
+    loss_manager = model.losses
 
     # Data collator
     # This one will take care of randomly masking the tokens.
-    data_collator = DataCollatorForT5MLM(
-        tokenizer=tokenizer,
-        noise_density=data_args.mlm_probability,
-        mean_noise_span_length=data_args.mean_noise_span_length,
-        input_length=max_seq_length,
-        target_length=targets_length,
-        pad_token_id=model.config.pad_token_id,
-        decoder_start_token_id=model.config.decoder_start_token_id,
+    data_collator = SequentialCollator(
+        TextGroupCollator(
+            expanded_inputs_length,
+            model.config.pad_token_id
+        ),
+        DataCollatorForT5MLM(
+            tokenizer=tokenizer,
+            noise_density=data_args.mlm_probability,
+            mean_noise_span_length=data_args.mean_noise_span_length,
+            input_length=max_seq_length,
+            target_length=targets_length,
+            pad_token_id=model.config.pad_token_id,
+            decoder_start_token_id=model.config.decoder_start_token_id,
+        )
     )
 
     # Store some constant
@@ -1024,7 +1108,7 @@ def main():
             "Use --overwrite_output_dir to overcome."
         )
 
-    trainer_argument = Seq2SeqTrainingArguments(
+    trainer_argument = CustomSeq2SeqTrainingArugment(
         os.path.join(training_args.output_dir, 'save'),
         logging_dir=training_args.output_dir,
         overwrite_output_dir=True,
@@ -1039,6 +1123,7 @@ def main():
         per_device_eval_batch_size=training_args.per_device_eval_batch_size,
         per_device_train_batch_size=training_args.per_device_train_batch_size,
         gradient_accumulation_steps=training_args.gradient_accumulated_steps,
+        max_obs_batch_size=training_args.max_obs_batch_size,
         learning_rate=training_args.learning_rate,
         weight_decay=training_args.weight_decay,
         **{key: value for key, value in training_args.to_dict().items() if 'adam' in key},
@@ -1047,16 +1132,21 @@ def main():
         max_steps=num_train_steps,
         # lr_scheduler_type='constant',
         # warmup_ratio=0,
-        # torch_compile=training_args.compile,
-        # torch_compile_mode='reduce-overhead',
         remove_unused_columns=False,
         # reproducibility
         full_determinism=True,
         seed=training_args.seed + dist.get_rank(),
-        fp16=True, # open automatic mixed precision
+        # fp16=True, # open automatic mixed precision
+        dataloader_num_workers=16,
+        gradient_checkpointing=training_args.gradient_checkpointing,
+        ddp_find_unused_parameters=False,
+        eval_accumulation_steps=32,
+        throw_empty_samples=training_args.throw_empty_samples
+        # torch_compile=training_args.compile,
+        # torch_compile_mode='reduce-overhead',
     )
 
-    metric = CrossEntropyMetric(training_args.eval_steps, writer=summary_writer)
+    metric = CrossEntropyMetric(training_args.eval_steps, loss_manager=loss_manager)
 
     trainer = CustomSeq2SeqTrainer(
         model=model,
@@ -1065,10 +1155,12 @@ def main():
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
         compute_metrics=metric.compute_metrics,
+        preprocess_logits_for_metrics=metric.preprocess_logits_for_metrics,
         optimizers=optimizer_scheduler,
     )
 
     trainer.add_callback(LoggingCallback())
+    logging.getLogger("tensorboard").setLevel(logging.WARNING)
     trainer.train(
         resume_from_checkpoint=training_args.resume
     )

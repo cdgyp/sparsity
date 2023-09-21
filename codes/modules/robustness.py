@@ -83,8 +83,9 @@ try:
             for m in self.main.modules():
                 if isinstance(m, ZerothBias):
                     ln: nn.LayerNorm = m.layer_norm.main
-                    del ln._parameters['bias']
-                    ln.register_parameter('bias', None)
+                    if 'bias' in ln._parameters:
+                        del ln._parameters['bias']
+                        ln.register_parameter('bias', None)
                     count += 1
             print(f"RestrictedAffine: {count} LayerNorm layers are restricted")
         def after_backward(self):

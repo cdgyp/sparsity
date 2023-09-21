@@ -1,7 +1,8 @@
 import sys
 import os
 for version in os.listdir(os.path.abspath('./extensions/lib')):
-    _relative_extensions_path = f'./extensions/lib/{version}/site-packages/jsrelu_ext-0.0-py3.8-linux-x86_64.egg'
+    version_numer = version[version.find('python') + len('python'):]
+    _relative_extensions_path = f'./extensions/lib/{version}/site-packages/jsrelu_ext-0.0-py{version_numer}-linux-x86_64.egg'
     sys.path.append(os.path.abspath(_relative_extensions_path))
 import torch
 from torch import nn

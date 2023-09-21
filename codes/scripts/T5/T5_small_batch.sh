@@ -14,7 +14,7 @@ do
     else
         extra=" "
     fi
-    torchrun --nproc_per_node $n_visible_devices --rdzv_backend=c10d module_wrapper.py codes.scripts.T5.T5  \
+    torchrun --nproc_per_node $((n_visible_devices * 2)) --rdzv_backend=c10d module_wrapper.py codes.scripts.T5.T5  \
         --model_type                t5                      \
         --config_name               hf_caches/t5-base       \
         --tokenizer_name            hf_caches/t5-base       \
@@ -22,9 +22,9 @@ do
         --overwrite_output_dir                  \
         --do_train                              \
         --do_eval                               \
-        --per_device_train_batch_size   64      \
+        --per_device_train_batch_size   32      \
         --gradient_accumulated_steps    1       \
-        --max_obs_batch_size            32      \
+        --max_obs_batch_size            16      \
         --per_device_eval_batch_size    64      \
         --max_steps                     1e5     \
         --learning_rate                 0.01    \
