@@ -19,7 +19,7 @@ from torch import Tensor, nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 from ...base import LossManager, Model, addprop
-from ...scheduler.sine import SineAnnealingScheduler
+# from ...scheduler.sine import SineAnnealingScheduler
 
 import inspect
 
@@ -287,7 +287,7 @@ def main(args):
         args.physical_batch_size = args.batch_size_per_proc
     if args.physical_epochs is None:
         args.physical_epochs = args.epochs
-    if args.from_scratch:
+    if args.from_scratch or args.finetune:
         args.start_epoch = 0
     if args.output_dir:
         utils.mkdir(args.output_dir)
@@ -337,6 +337,8 @@ def main(args):
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu")
+        args.start_epoch = checkpoint["epoch"] + 1 if args.resume else args.start_epoch
+    print(f"Starting from epoch {args.start_epoch}")
 
     print("Creating model")
     if args.model in ['vanilla', 'sparsified']:
@@ -456,11 +458,8 @@ def main(args):
         model_without_ddp.load_state_dict(checkpoint["model"])
         if not args.test_only:
             optimizer.load_state_dict(checkpoint["optimizer"])
-            if not args.dont_resume_lr_schedulers:
-                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            lr_scheduler.step(lr_scheduler.last_epoch)
-            pass 
-        args.start_epoch = checkpoint["epoch"] + 1
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            # lr_scheduler.step(lr_scheduler.last_epoch)
         if model_ema:
             model_ema.load_state_dict(checkpoint["model_ema"])
         if scaler:
@@ -580,7 +579,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--lr-min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
     parser.add_argument("--print-freq", default=10, type=int, help="print frequency")
     parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
-    parser.add_argument("--resume", default="", type=str, help="path of checkpoint")
+    parser.add_argument("--resume", default=None, type=str, help="path of checkpoint")
     parser.add_argument("--start-epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument(
         "--cache-dataset",
@@ -660,6 +659,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--magic-synapse", action='store_true')
     parser.add_argument("--magic-synapse-rho", type=float, default='0.1')
     parser.add_argument("--compile", action='store_true')
+    parser.add_argument("--finetune", type=str, default=None)
     return parser
 
 

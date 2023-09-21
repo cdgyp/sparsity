@@ -37,11 +37,34 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
     if sparsified:
         args.restricted_affine=True
 
-    vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
+    vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch and not args.finetune else None, progress=True, wide=args.wide, **{
         'num_classes': 1000,
         'rezero': False,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
+
+    if args.finetune:
+        checkpoint = torch.load(args.finetune, map_location="cpu")
+        model, _, output_dir = ImageNet1kSparsify()(
+                'imagenet1k', 
+                args.title + '/' + model_type,
+                vit,
+                False,
+                False,
+                args.magic_synapse,
+                False,
+                args.zeroth_bias_clipping,
+                rho=args.magic_synapse_rho,
+                log_per_step=args.log_per_step,
+                device=args.gpu if args.distributed else "cuda",
+                epoch_size=epoch_size,
+                start_epoch=start_epoch,
+                resume=None,
+                dataloader=dataloader,
+                physical_batch_size=args.physical_batch_size,
+            )
+        model.load_state_dict(checkpoint["model"])
+        vit = model.main.model
     
     model, _, output_dir = ImageNet1kSparsify()(
             'imagenet1k', 
