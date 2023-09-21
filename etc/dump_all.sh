@@ -1,3 +1,36 @@
+# Experiments for Productivity
+
+for model_type in vanilla sparsified;
+do
+    for activation_type in activation pre_activation;
+    do
+        for stage_type in train test;
+        do
+            python etc/dump.py --source-dir runs/imagenet1k/from_scratch5/$model_type/*/activation_concentration_\($stage_type\)/\[obs\]$activation_type --output-dir dumps/imagenet1k/$model_type/$activation_type
+        done
+    done
+
+    for stage_type in "" test_;
+    do
+        for top_type in 1 5;
+        do
+            python etc/dump.py --source-dir runs/imagenet1k/from_scratch5/$model_type/*/${stage_type}acc/ --output-dir dumps/imagenet1k/$model_type/
+        done
+    done
+
+    for matrix_type in kkT M;
+    do
+
+        python etc/dump.py --source-dir runs/imagenet1k/from_scratch5/$model_type/*/spectral_increase/\[obs\]$matrix_type --output-dir dumps/imagenet1k/$model_type/spectral_increase
+
+    done
+done
+
+exit
+
+
+## Finetuning
+
 for type in vanilla sparsified;
 do
     python etc/dump.py --source-dir runs/imagenet1k/finetune/$type/*/activation_concentration_\(test\)_\[obs\]activation/ --output-dir dumps/finetuning/$type/
@@ -38,14 +71,6 @@ if [ $type == sparsified ]; then
 fi
 
 python etc/dump.py --source-dir "runs/imagenet1k/$full/verification_norm1_${matrix_type}_[obs]diagonals/" --output-dir dumps/$folder/$type/spectral/
-
-done
-done
-
-for norm in 1 2; do
-for matrix_type in kkT M hadamard;do
-
-python etc/dump.py --source-dir "runs/imagenet1k/from_scratch4/sparsified/20230809-160718/verification_norm${norm}_${matrix_type}_[obs]ratio/" --output-dir dumps/imagenet1k/sparsified/diagonal/
 
 done
 done

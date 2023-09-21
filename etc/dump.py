@@ -1,5 +1,5 @@
 import os
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator, ScalarEvent
 import pandas as pd
 from argparse import ArgumentParser
 
@@ -9,6 +9,37 @@ def get_subtag(acc: EventAccumulator):
         return int(str_tag)
     except:
         return str(str_tag)
+    
+class Idel:
+    def __init__(self, value, step):
+        self.value = value
+        self.step = step
+
+def step_aligned_zip(*lists):
+    # Collect all unique steps
+    all_steps = sorted(set(elem.step for lst in lists for elem in lst))
+
+    aligned_lists = []
+
+    nan_count = 0
+    for lst in lists:
+        aligned_list = []
+        sorted_lst = sorted(lst, key=lambda x: x.wall_time)
+        steps_in_lst = {elem.step: elem for elem in sorted_lst}
+
+        for step in all_steps:
+            if step in steps_in_lst:
+                aligned_list.append(steps_in_lst[step])
+            else:
+                aligned_list.append(Idel(float('nan'), step))
+                nan_count += 1
+        
+        aligned_lists.append(aligned_list)
+    
+    if nan_count > 0:
+        print(nan_count, "NaNs")
+
+    return zip(*aligned_lists)
 
 def tabulate_events(dpath, filter=None):
     def _filter(dname):
@@ -18,6 +49,8 @@ def tabulate_events(dpath, filter=None):
             return dname in filter
         except:
             return filter(dname)
+
+    print(dpath)
 
     summary_iterators = [EventAccumulator(os.path.join(dpath, dname)).Reload() for dname in os.listdir(dpath) if os.path.isdir(os.path.join(dpath, dname)) and _filter(dname)]
     summary_iterators = sorted(summary_iterators, key=lambda acc: get_subtag(acc))
@@ -34,8 +67,8 @@ def tabulate_events(dpath, filter=None):
     for tag in tags:
         subtags = [get_subtag(acc) for acc in summary_iterators]
         records = []
-        for events in zip(*[acc.Scalars(tag) for acc in summary_iterators]):
-            assert len(set(e.step for e in events)) == 1
+        for events in step_aligned_zip(*[acc.Scalars(tag) for acc in summary_iterators]):
+            assert len(set(e.step for e in events)) == 1, [e.step for e in events]
             step = events[0].step
             records.append({'step': step, **{subtag: e.value for subtag, e in zip(subtags, events)}})
         out[tag] = pd.DataFrame.from_records(records)
