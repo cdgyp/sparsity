@@ -7,6 +7,7 @@ for version in os.listdir(os.path.abspath('./extensions/lib')):
 import torch
 from torch import nn
 import jsrelu_ext
+from ..base import BaseModule, Plugin, ModuleReference
 
 class CustomizedActivation(nn.Module):
     def __init__(self) -> None:
@@ -244,6 +245,64 @@ try:
 except: pass
 
 
+
+class MixedActivation(CustomizedActivation):
+    def __init__(self, *activations: CustomizedActivation) -> None:
+        super().__init__()
+        self.activations = activations
+        self.ks = [1.0] + [0.0] * (len(self.activations) - 1)
+    def forward(self, x):
+        res = 0
+        for k, activation in zip(self.ks, self.activations):
+            if k != 0.0:
+                res = k + activation(x)
+        return res
+    def _insert(self, res: 'dict[str, torch.Tensor]', key, interval):
+        if key not in res:
+            res[key] = interval
+        else:
+            res[key][0] = max(res[key][0], interval[0])
+            res[key][1] = min(res[key][1], interval[1])
+        
+    def _intersection(self, a: 'dict[str, torch.Tensor]', b: 'dict[str, torch.Tensor]'):
+        res = {}
+        for key, interval in a.items():
+            self._insert(res, key, interval)
+        for key, interval in b.items():
+            self._insert(res, key, interval)
+        return res
+
+    def get_habitat(self) -> 'dict[str, torch.Tensor]':
+        res = {}
+        for k, act in zip(self.ks, self.activations):
+            if k != 0.0:
+                res = self._intersection(res, act.get_habitat())
+        return res
+
+class ActivationMixingScheduler(Plugin):
+    def _compute_ks(self):
+        pass
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.main = ModuleReference(main)
+    def prepare(self, *args, **lwargs):
+        ks = self._compute_ks()
+        for m in self.main.modules():
+            if isinstance(m, MixedActivation):
+                m.ks = ks
+        
+class LinearActivationMixing(ActivationMixingScheduler):
+    def __init__(self, max_epoch=None, max_iteration=None):
+        super().__init__()
+        self.max_epoch = max_epoch
+        self.max_iteration = max_iteration
+        assert (self.max_epoch is None and self.max_iteration is not None) or (self.max_epoch is not None and self.max_iteration is None)
+
+    def _compute_ks(self):
+        if self.max_epoch is None:
+            k = self.epoch / self.max_epoch
+        else:
+            k = self.iteration / self.max_iteration
+        return [1 - k, k]
 
 if __name__ == "__main__":
     sjsrelu = _SparseJumpingSquaredReLU.apply
