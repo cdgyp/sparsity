@@ -660,6 +660,8 @@ def get_args_parser(add_help=True):
     parser.add_argument("--magic-synapse-rho", type=float, default='0.1')
     parser.add_argument("--compile", action='store_true')
     parser.add_argument("--finetune", type=str, default=None)
+    parser.add_argument("--lora", action="store_true")
+    parser.add_argument("--lora_r", type=int, default=16)
     return parser
 
 

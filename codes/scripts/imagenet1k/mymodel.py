@@ -45,6 +45,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
 
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location="cpu")
+        
         model, _, output_dir = ImageNet1kSparsify()(
                 'imagenet1k', 
                 args.title + '/' + model_type,
@@ -62,8 +63,18 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
                 resume=None,
                 dataloader=dataloader,
                 physical_batch_size=args.physical_batch_size,
+                tensorboard_server=False,
+                no_obs=True
             )
-        model.load_state_dict(checkpoint["model"])
+
+        if args.lora:
+            from ...modules.lora import LoRAfy
+            model = LoRAfy(args.lora_r)(model)
+            strict = False
+        else:
+            strict = True
+        
+        model.load_state_dict(checkpoint["model"], strict=strict)
         vit = model.main.model
     
     model, _, output_dir = ImageNet1kSparsify()(

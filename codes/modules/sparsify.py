@@ -1,4 +1,5 @@
 import os
+from typing import Any
 import torch
 from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
 from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin, VGradientObservationPlugin
@@ -68,6 +69,8 @@ class Sparsify:
         dataloader=None,
         physical_batch_size=None,
         tensorboard_server=True,
+        no_obs=False,
+        mixed_activation=False
     ):
         if restricted_affine is None:
             restricted_affine = db_mlp
@@ -100,14 +103,21 @@ class Sparsify:
             model = MagicSynapse.plug_in(model=model, rho=rho, filter=self.magic_synapse_filter)
             print("MagicSynapse: Finished")
 
+        if no_obs:
+            obs = []
+        else:
+            obs = [
+                RestrictAffinePlugin(log_per_step=log_per_step) if restricted_affine else None,
+                ActivationDistributionPlugin(self.mlp_types, log_per_step),
+                ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
+                SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
+                EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
+                VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=log_per_step),
+            ]
+        
         model = self.model_type(
             self.wrapper_type(model),
-            RestrictAffinePlugin(log_per_step=log_per_step) if restricted_affine else None,
-            ActivationDistributionPlugin(self.mlp_types, log_per_step),
-            ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
-            SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
-            EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
-            VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=log_per_step),
+            *obs
         ).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
@@ -121,7 +131,7 @@ class Sparsify:
             assert dataloader is not None
             with torch.no_grad():
                 X, Y = next(iter(dataloader))
-                pred = model(X.to(device)[:physical_batch_size])
+                pred = model(X.to(device)[:1])
                 if hasattr(model, 'clean'):
                     model.clean()
         return model, writer, writer.logdir
