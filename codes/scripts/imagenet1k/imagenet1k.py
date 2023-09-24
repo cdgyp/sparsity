@@ -342,7 +342,7 @@ def main(args):
 
     print("Creating model")
     if args.model in ['vanilla', 'sparsified']:
-        model = get_imagenet1k_model(args.model, data_loader, args, start_epoch=checkpoint['epoch'] + 1 if args.resume else 0, epoch_size=len(data_loader))
+        model = get_imagenet1k_model(args.model, data_loader, args, start_epoch=checkpoint['epoch'] + 1 if args.resume else 0, epoch_size=len(data_loader), max_epoch_mixing_activations=args.activation_mixing_epoch)
     else:
         model = torchvision.models.get_model(args.model, weights=args.weights, num_classes=num_classes)
     model.to(device)
@@ -661,7 +661,8 @@ def get_args_parser(add_help=True):
     parser.add_argument("--compile", action='store_true')
     parser.add_argument("--finetune", type=str, default=None)
     parser.add_argument("--lora", action="store_true")
-    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--activation-mixing-epoch", type=int, default=10)
     return parser
 
 

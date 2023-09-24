@@ -48,7 +48,7 @@ class ActivationHook(Hook):
                     res.append(h)
                     print(f'\t{rank}{name1}{name2}: {submodule.__class__}')
                     break
-        print(f"ActivationHook: {rank}{count} {hook_type}s hooked")
+        print(f"ActivationHook: {rank}{count}s {hook_type} hooked")
         
         return res
 

@@ -278,6 +278,12 @@ class MixedActivation(CustomizedActivation):
             if k != 0.0:
                 res = self._intersection(res, act.get_habitat())
         return res
+    def derivative(self, x):
+        res = 0
+        for (k, act) in zip(self.ks, self.activations):
+            if k != 0.0:
+                res = res + k * act.derivative(x)
+        return res
 
 class ActivationMixingScheduler(Plugin):
     def _compute_ks(self):
@@ -302,6 +308,8 @@ class LinearActivationMixing(ActivationMixingScheduler):
             k = self.epoch / self.max_epoch
         else:
             k = self.iteration / self.max_iteration
+        print(1-k, k)
+        self.losses.observe(k, 'portion_of_jsrelu')
         return [1 - k, k]
 
 if __name__ == "__main__":

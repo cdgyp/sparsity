@@ -3,7 +3,7 @@ from typing import Any
 import torch
 from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
 from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin, VGradientObservationPlugin
-from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
+from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU, MixedActivation, LinearActivationMixing
 from .robustness import RestrictAffinePlugin, DoublyBiased, ZerothBiasPlugin
 from .magic import MagicSynapse
 from torch.distributed import get_rank
@@ -20,7 +20,7 @@ class Sparsify:
         pass
 
     def activation_function_filter(self, path, name, module):
-        return isinstance(module, torch.nn.ReLU)
+        return ('relu' in module.__class__.__name__.lower()) or isinstance(module, ActivationPosition)
 
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
         if isinstance(jsrelu, str):
@@ -38,6 +38,7 @@ class Sparsify:
             p = '.'.join([path, name])
             if self.activation_function_filter(path, name, module):
                 setattr(model, name, make_act())
+                self.activations.append(f"{p}: {module.__class__}")
             else:
                 self.replace_activations(module, jsrelu=jsrelu, path=p)
         return model
@@ -80,7 +81,7 @@ class Sparsify:
         physical_batch_size=None,
         tensorboard_server=True,
         no_obs=False,
-        mixed_activation=False
+        mixed_scheduling={'max_epoch': None, 'max_iteration': None}
     ):
         if restricted_affine is None:
             restricted_affine = db_mlp
@@ -103,6 +104,9 @@ class Sparsify:
             print(f'Sparsify: {len(self.mlps)} MLP blocks replaced')
 
         print("Sparsify: replacing activation functions")
+        if isinstance(jsrelu, str) and jsrelu == 'mixed':
+            mixed_activation_maker = lambda: ActivationPosition(MixedActivation(CustomizedReLU(), JumpingSquaredReLU()))
+            jsrelu = mixed_activation_maker
         model = self.replace_activations(model, jsrelu=jsrelu)
         for a in self.activations:
             print(f'\t{a}')
@@ -123,6 +127,7 @@ class Sparsify:
                 SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
                 EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
                 VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=log_per_step),
+                LinearActivationMixing(**mixed_scheduling) if jsrelu == 'mixed' else None,
             ]
         
         model = self.model_type(

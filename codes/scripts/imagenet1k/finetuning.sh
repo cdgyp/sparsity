@@ -14,6 +14,7 @@ do
         --log_per_step 20 --physical-epochs 15 \
         --dont-resume-lr-schedulers \
         --finetune runs/finetuning/start/start.pth \
-        --lora --lora_r 16  \
+        --lora --lora-r 16  \
+        --activation-mixing-epoch 5 \
         "$@"
 done

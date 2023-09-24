@@ -31,7 +31,7 @@ class ImageNet1kSparsify(Sparsify):
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
         return '.mlp.' in name
 
-def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1):
+def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1, max_epoch_mixing_activations=10):
     if model_type not in ['vanilla', 'sparsified']:
         raise NotImplemented(model_type)
     sparsified = (model_type == 'sparsified')
@@ -46,6 +46,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
     })
 
     if args.finetune:
+        print(f"finetuning from {args.finetune}")
         checkpoint = torch.load(args.finetune, map_location="cpu")
         
         model, _, output_dir = ImageNet1kSparsify()(
@@ -66,7 +67,8 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
                 dataloader=dataloader,
                 physical_batch_size=args.physical_batch_size,
                 tensorboard_server=False,
-                no_obs=True
+                no_obs=True,
+                mixed_scheduling={'max_epoch': max_epoch_mixing_activations}
             )
 
         if args.lora:
@@ -76,7 +78,9 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         else:
             strict = True
         
-        model.load_state_dict(checkpoint["model"], strict=strict)
+        matching_status = model.load_state_dict(checkpoint["model"], strict=strict)
+        assert len(matching_status.unexpected_keys) == 0, (matching_status.unexpected_keys, matching_status.missing_keys)
+        assert all(['lora' in key for key in matching_status.missing_keys]), (matching_status.unexpected_keys, matching_status.missing_keys)
         vit = model.main.model
     
     model, _, output_dir = ImageNet1kSparsify()(
@@ -84,7 +88,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
             args.title + '/' + model_type,
             vit,
             sparsified,
-            sparsified,
+            sparsified if sparsified and not args.finetuning else 'mixed',
             args.magic_synapse,
             args.restricted_affine,
             args.zeroth_bias_clipping,
