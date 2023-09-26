@@ -74,9 +74,10 @@ try:
         """
             restrict the scaling factors of LayerNorm layers preceeding zeroth biases
         """
-        def __init__(self, log_per_step=1):
+        def __init__(self, log_per_step=1, finetuning=False):
             super().__init__()
             self.log_per_step = log_per_step
+            self.finetuning = finetuning
         def register(self, main: BaseModule, plugins: 'list[Plugin]'):
             self.main = ModuleReference(main)
             count = 0
@@ -84,11 +85,17 @@ try:
                 if isinstance(m, ZerothBias):
                     ln: nn.LayerNorm = m.layer_norm.main
                     if 'bias' in ln._parameters:
-                        del ln._parameters['bias']
-                        ln.register_parameter('bias', None)
+                        if not self.finetuning:
+                            del ln._parameters['bias']
+                            ln.register_parameter('bias', None)
+                        else:
+                            ln.bias.requires_grad = False
                     count += 1
             print(f"RestrictedAffine: {count} LayerNorm layers are restricted")
         def after_backward(self):
+            if self.finetuning:
+                return
+
             with torch.no_grad():
                 for m in self.main.modules():
                     if not isinstance(m, ZerothBias):
