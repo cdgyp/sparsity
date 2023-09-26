@@ -254,6 +254,7 @@ class MixedActivation(CustomizedActivation):
     def forward(self, x):
         res = 0
         for k, activation in zip(self.ks, self.activations):
+            k = max(min(k, 1), 0)
             if k != 0.0:
                 res = res + k * activation(x)
         return res
@@ -281,6 +282,7 @@ class MixedActivation(CustomizedActivation):
     def derivative(self, x):
         res = 0
         for (k, act) in zip(self.ks, self.activations):
+            k = max(min(k, 1), 0)
             if k != 0.0:
                 res = res + k * act.derivative(x)
         return res
@@ -308,6 +310,8 @@ class LinearActivationMixing(ActivationMixingScheduler):
             k = self.epoch / self.max_epoch
         else:
             k = self.iteration / self.max_iteration
+        k = min(k, 1)
+        k = max(k, 0)
         self.losses.observe(k, 'portion_of_jsrelu')
         return [1 - k, k]
 

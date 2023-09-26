@@ -44,6 +44,8 @@ class Sparsify:
         if self.restricted_affine is None:
             self.restricted_affine = self.db_mlp
 
+        print(self.mixed_scheduling)
+
 
     
     def extract_linear_layers(self, mlp) -> 'dict[str, torch.nn.Linear]':
@@ -105,8 +107,8 @@ class Sparsify:
             for ob in obs:
                 if ob is not None:
                     assert len(list(ob.parameters())) == 0
+            obs = []
         
-        print(obs)
         model = self.model_type(
             self.wrapper_type(model),
             *obs
