@@ -9,12 +9,42 @@ from .magic import MagicSynapse
 from torch.distributed import get_rank
 
 class Sparsify:
-    def __init__(self, model_type=Model, wrapper_type=Wrapper) -> None:
+    def __init__(self, 
+        db_mlp: bool,
+        jsrelu: bool,
+        magic_synapse: bool,
+        restricted_affine: bool=None,
+        zeroth_bias_clipping=0.1,
+        db_mlp_shape=None,
+        rho=0.1,
+        log_per_step=10,
+        mixed_scheduling={'max_epoch': None, 'max_iteration': None},
+        lora_r=None,
+        model_type=Model, 
+        wrapper_type=Wrapper,
+    ) -> None:
         self.activations = []
         self.mlps = []
         self.mlp_types = []
         self.model_type = model_type
         self.wrapper_type = wrapper_type
+
+        self.db_mlp = db_mlp
+
+        self.jsrelu = jsrelu
+        self.magic_synapse = magic_synapse
+        self.restricted_affine = restricted_affine
+        self.zeroth_bias_clipping = zeroth_bias_clipping
+        self.db_mlp_shape = db_mlp_shape
+        self.rho = rho
+        self.log_per_step = log_per_step
+        self.mixed_scheduling = mixed_scheduling
+        self.lora_r = lora_r
+
+        if self.restricted_affine is None:
+            self.restricted_affine = self.db_mlp
+
+
     
     def extract_linear_layers(self, mlp) -> 'dict[str, torch.nn.Linear]':
         pass
@@ -61,30 +91,48 @@ class Sparsify:
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
         return True
 
+    def _make_model(self, model, finetuning, has_obs=True):
+        obs: 'list[torch.nn.Module]' = [
+            RestrictAffinePlugin(log_per_step=self.log_per_step, finetuning=(finetuning is not None)) if self.restricted_affine else None,
+            ActivationDistributionPlugin(self.mlp_types, self.log_per_step),
+            ZerothBiasPlugin(self.zeroth_bias_clipping, log_per_step=self.log_per_step) if self.db_mlp else None,
+            SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
+            EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
+            VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=self.log_per_step),
+            LinearActivationMixing(**self.mixed_scheduling) if self.jsrelu == 'mixed' or (isinstance(self.jsrelu, bool) and self.jsrelu and finetuning) else None,
+        ]
+        if not has_obs:
+            for ob in obs:
+                if ob is not None:
+                    assert len(list(ob.parameters())) == 0
+        
+        print(obs)
+        model = self.model_type(
+            self.wrapper_type(model),
+            *obs
+        )
+
+        return model
+
+    def load_checkpoint(self, model: torch.nn.Module, path: str, strict: bool):
+        checkpoint = torch.load(path, map_location="cpu")
+        matching_status = model.load_state_dict(checkpoint["model"], strict=strict)
+        assert len(matching_status.unexpected_keys) == 0, (matching_status.unexpected_keys, matching_status.missing_keys)
+        assert all(['lora' in key for key in matching_status.missing_keys]), (matching_status.unexpected_keys, matching_status.missing_keys)
+
+        return model
     
     def __call__(self, 
         name: str,
         title: str,
         model: torch.nn.Module,
-        db_mlp: bool,
-        jsrelu: bool,
-        magic_synapse: bool,
-        restricted_affine: bool=None,
-        zeroth_bias_clipping=0.1,
-        db_mlp_shape=None,
-        rho=0.1,
-        log_per_step=10,
-        device='cuda',
-        epoch_size=0, start_epoch=0, steps=None,
         resume=None,
+        finetuning=None,
+        epoch_size=0, start_epoch=0, steps=None,
         dataloader=None,
-        physical_batch_size=None,
         tensorboard_server=True,
-        no_obs=False,
-        mixed_scheduling={'max_epoch': None, 'max_iteration': None}
+        device='cuda',
     ):
-        if restricted_affine is None:
-            restricted_affine = db_mlp
 
         if resume is not None and len(resume) > 0:
             if 'save' in resume:
@@ -94,46 +142,53 @@ class Sparsify:
         else:
             dir = name + '/' + title + '/'
 
+        main = model
+        del model
+
         writer, _ = new_experiment(dir, None, dir_to_runs='runs', resume=resume is not None and len(resume) > 0, device=device)
 
-        if db_mlp:
+        if finetuning is not None:
+            model = self._make_model(main, finetuning, has_obs=False)
+
+            if self.lora_r is not None:
+                from .lora import LoRAfy
+                model = LoRAfy(self.lora_r)(model)
+                strict = False
+            else:
+                strict = True
+
+            print(f"finetuning for sparsity from {finetuning}")
+            model = self.load_checkpoint(model, finetuning, strict)
+            main = model.main.model
+            del model
+
+        if self.db_mlp:
             print("Sparsify: replacing singly biased MLPs")
-            model = self.replace_MLPs(model, zeroth_bias_clipping, db_mlp_shape)
+            main = self.replace_MLPs(main, self.zeroth_bias_clipping, self.db_mlp_shape)
             for m in self.mlps:
                 print(f'\t{m}')
             print(f'Sparsify: {len(self.mlps)} MLP blocks replaced')
 
         print("Sparsify: replacing activation functions")
+        jsrelu = self.jsrelu
+        if finetuning and isinstance(jsrelu, bool) and jsrelu:
+            jsrelu = 'mixed'
         if isinstance(jsrelu, str) and jsrelu == 'mixed':
             mixed_activation_maker = lambda: ActivationPosition(MixedActivation(CustomizedReLU(), JumpingSquaredReLU()))
             jsrelu = mixed_activation_maker
-        model = self.replace_activations(model, jsrelu=jsrelu)
+        else:
+            jsrelu = self.jsrelu
+        main = self.replace_activations(main, jsrelu=jsrelu)
         for a in self.activations:
             print(f'\t{a}')
-        print(f'Sparsify: {len(self.activations)} activations replaced')
+        print(f'Sparsify: {len(self.activations)} activations replaced to {self.jsrelu}')
         
-        if magic_synapse:
+        if self.magic_synapse:
             print("MagicSynapse: Plugging in")
-            model = MagicSynapse.plug_in(model=model, rho=rho, filter=self.magic_synapse_filter)
+            main = MagicSynapse.plug_in(model=main, rho=self.rho, filter=self.magic_synapse_filter)
             print("MagicSynapse: Finished")
-
-        if no_obs:
-            obs = []
-        else:
-            obs = [
-                RestrictAffinePlugin(log_per_step=log_per_step) if restricted_affine else None,
-                ActivationDistributionPlugin(self.mlp_types, log_per_step),
-                ZerothBiasPlugin(zeroth_bias_clipping, log_per_step=log_per_step) if db_mlp else None,
-                SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
-                EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=log_per_step),
-                VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=log_per_step),
-                LinearActivationMixing(**mixed_scheduling) if jsrelu == 'mixed' else None,
-            ]
         
-        model = self.model_type(
-            self.wrapper_type(model),
-            *obs
-        ).to(device)
+        model = self._make_model(main, finetuning, has_obs=True).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
         model.epoch = start_epoch
@@ -141,7 +196,7 @@ class Sparsify:
         if tensorboard_server:
             start_tensorboard_server(writer.logdir)
 
-        if db_mlp and db_mlp_shape is None:
+        if self.db_mlp and self.db_mlp_shape is None:
             # make parameters of dynamic modules of implicit adversarial samples ready
             assert dataloader is not None
             with torch.no_grad():

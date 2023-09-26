@@ -249,13 +249,13 @@ except: pass
 class MixedActivation(CustomizedActivation):
     def __init__(self, *activations: CustomizedActivation) -> None:
         super().__init__()
-        self.activations = activations
+        self.activations = nn.ModuleList(activations)
         self.ks = [1.0] + [0.0] * (len(self.activations) - 1)
     def forward(self, x):
         res = 0
         for k, activation in zip(self.ks, self.activations):
             if k != 0.0:
-                res = k + activation(x)
+                res = res + k * activation(x)
         return res
     def _insert(self, res: 'dict[str, torch.Tensor]', key, interval):
         if key not in res:
@@ -304,11 +304,10 @@ class LinearActivationMixing(ActivationMixingScheduler):
         assert (self.max_epoch is None and self.max_iteration is not None) or (self.max_epoch is not None and self.max_iteration is None)
 
     def _compute_ks(self):
-        if self.max_epoch is None:
+        if self.max_epoch is not None:
             k = self.epoch / self.max_epoch
         else:
             k = self.iteration / self.max_iteration
-        print(1-k, k)
         self.losses.observe(k, 'portion_of_jsrelu')
         return [1 - k, k]
 
