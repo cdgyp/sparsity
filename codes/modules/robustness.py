@@ -27,6 +27,7 @@ class ZerothBias(nn.Module):
                     absolute_clipping = self.clipping * (self.layer_norm.weight.abs().unsqueeze(dim=-2) if hasattr(self.layer_norm, 'weight') and self.layer_norm.weight is not None else 1)
                 else:
                     absolute_clipping = self.clipping
+                if self.training: assert self.biases.requires_grad
                 min_tensor, max_tensor = -absolute_clipping, absolute_clipping
                 self.biases.copy_(torch.maximum(min_tensor, torch.minimum(self.biases, max_tensor)))
 

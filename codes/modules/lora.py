@@ -26,9 +26,13 @@ class LoRAfy:
 
         # freeze parameters, except those in biases and zeroth-biases
         lora.mark_only_lora_as_trainable(model, bias='all')
-        for m in model.modules():
+        for name, m in model.named_modules():
             if isinstance(m, MagicSynapse) or isinstance(m, ZerothBias):
                 for p in m.parameters():
+                    print("LoRa: unfreeze", name)
                     p.requires_grad = True
+            if isinstance(m, torch.nn.LayerNorm) and hasattr(m, 'weight'):
+                print("LoRa: unfreeze scaling factors of", name)
+                m.weight.requires_grad = True
 
         return model

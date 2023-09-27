@@ -11,7 +11,7 @@ IFS=','
 for model in $MODELS;
 do
     torchrun --nproc_per_node=$n_visible_devices module_wrapper.py codes.scripts.imagenet1k.imagenet1k   \
-        --model $model --start-epoch 0 --epochs 15 --batch-size $batch_size_per_proc --physical-batch-size 64 --opt adamw --lr 0.0005 --wd 0.3 \
+        --model $model --start-epoch 0 --epochs 15 --batch-size $batch_size_per_proc --physical-batch-size 64 --opt adamw --lr 0.003 --wd 0.3 \
         --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \
         --lr-scheduler cosineannealinglr  \
         --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
