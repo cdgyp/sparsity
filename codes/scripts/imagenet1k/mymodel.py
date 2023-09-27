@@ -46,7 +46,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         'rezero': False,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
-
+    
     model, _, output_dir = ImageNet1kSparsify(
         db_mlp=sparsified,
         jsrelu=sparsified,
