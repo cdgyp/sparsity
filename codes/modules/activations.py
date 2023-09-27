@@ -259,11 +259,13 @@ class MixedActivation(CustomizedActivation):
                 res = res + k * activation(x)
         return res
     def _insert(self, res: 'dict[str, torch.Tensor]', key, interval):
+        assert len(interval) == 1
+        interval = interval[0]
         if key not in res:
-            res[key] = interval
+            res[key] = interval.unsqueeze(dim=0)
         else:
-            res[key][0] = max(res[key][0], interval[0])
-            res[key][1] = min(res[key][1], interval[1])
+            res[key][0, 0] = max(res[key][0, 0], interval[0])
+            res[key][0, 1] = min(res[key][0, 1], interval[1])
         
     def _intersection(self, a: 'dict[str, torch.Tensor]', b: 'dict[str, torch.Tensor]'):
         res = {}

@@ -196,6 +196,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys = None, **gen_kwargs):
         loss, logits, labels = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys, **gen_kwargs)
+        if hasattr(model, 'after_testing_step'):
+            model.after_testing_step()
         return loss, logits, inputs['labels']
 
     def _on_begin_of_step(self, inputs):

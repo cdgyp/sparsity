@@ -83,7 +83,11 @@ class ActivationMapHook(ForwardHook):
             assert isinstance(input, tuple) and len(input) == 1
             self.pre_activations.append(input[0][:self.max_batch_size])
     def get(self):
-        return torch.cat(self.activations, dim=0), torch.cat(self.pre_activations, dim=0)
+        try:
+            return torch.cat(self.activations, dim=0), torch.cat(self.pre_activations, dim=0)
+        except Exception as e:
+            print(self.activations, self.pre_activations)
+            raise e
     
     def clean(self):
         self.activations = None
@@ -574,6 +578,9 @@ class ActivationDistributionPlugin(HookingPlugin):
         # When gradient checkpointing is used, we want the hooks not to record the activations in second forward propogation
         # Therefore, we keep the activations and `logged` flag until minibatch backward. If it is cleaned as early as at the end of `forward()`, then activations will be registered again
 
+        self.clean()
+    
+    def after_testing_step(self):
         self.clean()
             
     def is_hook_active(self):

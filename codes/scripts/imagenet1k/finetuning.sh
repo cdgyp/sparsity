@@ -16,6 +16,7 @@ do
         --lr-scheduler cosineannealinglr  \
         --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
         --clip-grad-norm 1 --ra-sampler --cutmix-alpha 1.0 \
+	--workers 4 \
         --amp \
         --log_per_step 100 --physical-epochs 15 \
         --dont-resume-lr-schedulers \

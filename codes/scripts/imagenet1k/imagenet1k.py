@@ -156,6 +156,8 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
             metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
             metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
             num_processed_samples += batch_size
+            if hasattr(model, 'after_testing_step'):
+                model.after_testing_step()
     # gather the stats from all processes
 
     num_processed_samples = utils.reduce_across_processes(num_processed_samples)
@@ -179,6 +181,7 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
         model.losses.observe(metric_logger.acc5.global_avg / 100, 'test_acc', 5)
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.reset()
+        model.after_testing()
         model.epoch += 1
 
     print(f"{header} Acc@1 {metric_logger.acc1.global_avg:.3f} Acc@5 {metric_logger.acc5.global_avg:.3f}")
@@ -477,6 +480,7 @@ def main(args):
 
     def train_epochs():
         print("Start training")
+        evaluate(model, criterion, data_loader_test, device=device)
         with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
             start_time = time.time()
             for epoch in range(args.start_epoch, args.physical_epochs):
