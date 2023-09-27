@@ -7,10 +7,11 @@ class LoRAfy:
     def replace_linears(self, model: torch.nn.Module, path='model'):
         for name, module in model.named_children():
             p = '.'.join([path, name])
-            if isinstance(module, torch.nn.Linear) and not isinstance(module, lora.LoRALayer) and 'mlp' in p.lower():
-                lora_linear = lora.Linear(module.in_features, module.out_features, r=self.r, bias=(module.bias is not None))
-                setattr(model, name, lora_linear)
-                self.linears.append(p + ': ' + str(module.__class__))
+            if isinstance(module, torch.nn.Linear) and not isinstance(module, lora.LoRALayer):
+                if 'mlp' in p.lower() or 'head' in p.lower():
+                    lora_linear = lora.Linear(module.in_features, module.out_features, r=self.r, bias=(module.bias is not None))
+                    setattr(model, name, lora_linear)
+                    self.linears.append(p + ': ' + str(module.__class__))
             else:
                 self.replace_linears(module, path=p)
         return model

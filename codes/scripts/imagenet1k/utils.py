@@ -6,6 +6,7 @@ import os
 import time
 from collections import defaultdict, deque, OrderedDict
 from typing import List, Optional, Tuple
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
@@ -265,7 +266,7 @@ def init_distributed_mode(args):
     args.dist_backend = "nccl"
     print(f"| distributed init (rank {args.rank}): {args.dist_url}", flush=True)
     torch.distributed.init_process_group(
-        backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank
+        backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank, timeout=timedelta(hours=1)
     )
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)

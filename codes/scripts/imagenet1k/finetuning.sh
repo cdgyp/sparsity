@@ -16,7 +16,7 @@ do
         --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
         --clip-grad-norm 1 --ra-sampler --cutmix-alpha 1.0 \
         --amp \
-        --log_per_step 20 --physical-epochs 15 \
+        --log_per_step 100 --physical-epochs 15 \
         --dont-resume-lr-schedulers \
         --finetune runs/finetuning/start/start.pth \
         --lora --lora-r 16  \
