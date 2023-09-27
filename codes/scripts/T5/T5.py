@@ -82,6 +82,7 @@ from transformers.models.t5.modeling_t5 import T5LayerFF, T5DenseActDense
 from transformers.utils import send_example_telemetry
 
 import logging
+from codes.base import Model, Wrapper
 
 from codes.base.base import BaseModule, Plugin
 
@@ -115,6 +116,7 @@ class TrainingArguments:
     )
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=True, metadata={"help": "Whether to run eval on the dev set."})
+    scan_eval: bool = field(default=None, metadata={"help": "Evaluate all checkpoints. If this option is turned on, then `resume` indicates the directory holding all checkpoints instead of a single one"})
     per_device_train_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when not logging."}
     )
@@ -591,8 +593,8 @@ class HfWrapper(Wrapper):
         self.model.gradient_checkpointing_disable()
 
 class T5Sparsify(Sparsify):
-    def __init__(self) -> None:
-        super().__init__(HfModel, HfWrapper)
+    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, mixed_scheduling=..., lora_r=None, model_type=..., wrapper_type=...) -> None:
+        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, mixed_scheduling, lora_r, HfModel, HfWrapper)
         self.mlp_types = [T5DenseActDense]
 
     def extract_linear_layers(self, mlp: T5DenseActDense) -> 'dict[str, torch.nn.Linear]':
@@ -641,9 +643,7 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
     from ...modules.hooks import ActivationHook
     ActivationHook.max_batch_size = training_args.max_obs_batch_size
 
-    model, writer, output_dir = T5Sparsify()(
-        'T5', training_args.title,
-        T5,
+    model, writer, output_dir = T5Sparsify(
         db_mlp=model_args.db_mlp,
         jsrelu=model_args.jsrelu,
         magic_synapse=model_args.magic_synapse,
@@ -652,6 +652,9 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         db_mlp_shape=[max(inputs_length, targets_length), T5.config.d_model],
         rho=model_args.magic_synapse_rho,
         log_per_step=training_args.logging_steps,
+    )(
+        'T5', training_args.title,
+        T5,
         steps=0,
         start_epoch=0,
         resume=training_args.resume,
@@ -747,9 +750,17 @@ class CrossEntropyMetric(TbMetric):
 
 
 class LoggingCallback(TrainerCallback):
+    def __init__(self, resume=False) -> None:
+        super().__init__()
+        self.resume = False
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
-        model.epoch += 1
+        if self.resume:
+            model.epoch = state.epoch
+            model.iteration = state.global_step
+            self.resume = False
+        else:
+            model.epoch += 1
     def on_step_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         model.iteration += 1
@@ -1158,12 +1169,22 @@ def main():
         preprocess_logits_for_metrics=metric.preprocess_logits_for_metrics,
         optimizers=optimizer_scheduler,
     )
-
-    trainer.add_callback(LoggingCallback())
+    
+    trainer.add_callback(LoggingCallback(resume=(training_args.resume is not None)))
     logging.getLogger("tensorboard").setLevel(logging.WARNING)
-    trainer.train(
-        resume_from_checkpoint=training_args.resume
-    )
+
+    if not training_args.scan_eval:
+        trainer.train(
+            resume_from_checkpoint=training_args.resume
+        )
+    else:
+        if not (not training_args.do_train and  training_args.do_eval):
+            raise ValueError("Evaluation and no training are assumed under scanning evaluation")
+        for checkpoint in os.listdir(training_args.resume):
+            trainer.train(
+                resime_from_checkpoint=os.path.join(training_args.resume, checkpoint)
+            )
+
 
 if __name__ == "__main__":
     main()
