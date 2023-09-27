@@ -33,14 +33,6 @@ class ImageNet1kSparsify(Sparsify):
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
         return '.mlp.' in name
 
-def get_cuda_visible_devices_count():
-    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    
-    # Split by comma and filter out any empty values
-    devices = [x.strip() for x in cuda_visible_devices.split(",") if x.strip()]
-    
-    return len(devices)
-
 def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1, max_epoch_mixing_activations=10):
     if model_type not in ['vanilla', 'sparsified']:
         raise NotImplemented(model_type)
@@ -54,8 +46,6 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         'rezero': False,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
-
-    n_proc = get_cuda_visible_devices_count()
     
     model, _, output_dir = ImageNet1kSparsify(
         db_mlp=sparsified,
@@ -65,7 +55,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         zeroth_bias_clipping=args.zeroth_bias_clipping,
         rho=args.magic_synapse_rho,
         log_per_step=args.log_per_step,
-        mixed_scheduling={'max_iteration': args.activation_mixing_epoch * len(dataloader) // n_proc},
+        mixed_scheduling={'max_iteration': args.activation_mixing_epoch * len(dataloader)},
         lora_r=args.lora_r
     )(
             'imagenet1k', 
