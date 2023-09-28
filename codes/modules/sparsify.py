@@ -118,7 +118,15 @@ class Sparsify:
 
     def load_checkpoint(self, model: torch.nn.Module, path: str, strict: bool):
         checkpoint = torch.load(path, map_location="cpu")
-        matching_status = model.load_state_dict(checkpoint["model"], strict=strict)
+        sd = checkpoint["model"]
+        if 'main.model.conv_proj.weight' not in model.state_dict():
+            sd = {}
+            for key, value in checkpoint["model"].items():
+                key: str
+                if 'conv_proj' in key:
+                    key = key.replace('conv_proj', 'conv_proj.conv')
+                sd[key] = value
+        matching_status = model.load_state_dict(sd, strict=strict)
         assert len(matching_status.unexpected_keys) == 0, (matching_status.unexpected_keys, matching_status.missing_keys)
         assert all(['lora' in key for key in matching_status.missing_keys]), (matching_status.unexpected_keys, matching_status.missing_keys)
 
@@ -207,4 +215,9 @@ class Sparsify:
                 pred = model(X.to(device)[:1])
                 if hasattr(model, 'clean'):
                     model.clean()
+
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                print(name)
+
         return model, writer, writer.logdir
