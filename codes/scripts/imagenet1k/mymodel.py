@@ -67,6 +67,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
             start_epoch=start_epoch,
             dataloader=dataloader,
             device=args.gpu if args.distributed else "cuda",
+            mixed_activation=args.mixed_activation
         )
     
     args.output_dir = output_dir

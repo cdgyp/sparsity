@@ -93,7 +93,7 @@ class Sparsify:
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
         return True
 
-    def _make_model(self, model, finetuning, has_obs=True):
+    def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False):
         obs: 'list[torch.nn.Module]' = [
             RestrictAffinePlugin(log_per_step=self.log_per_step, finetuning=(finetuning is not None)) if self.restricted_affine else None,
             ActivationDistributionPlugin(self.mlp_types, self.log_per_step),
@@ -101,7 +101,7 @@ class Sparsify:
             SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
             EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
             VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=self.log_per_step),
-            LinearActivationMixing(**self.mixed_scheduling) if self.jsrelu == 'mixed' or (isinstance(self.jsrelu, bool) and self.jsrelu and finetuning) else None,
+            LinearActivationMixing(**self.mixed_scheduling) if use_mixed_activation else None,
         ]
         if not has_obs:
             for ob in obs:
@@ -134,6 +134,7 @@ class Sparsify:
         dataloader=None,
         tensorboard_server=True,
         device='cuda',
+        mixed_activation=False
     ):
 
         if resume is not None and len(resume) > 0:
@@ -173,7 +174,7 @@ class Sparsify:
 
         print("Sparsify: replacing activation functions")
         jsrelu = self.jsrelu
-        if finetuning and isinstance(jsrelu, bool) and jsrelu:
+        if finetuning and isinstance(jsrelu, bool) and jsrelu and mixed_activation:
             jsrelu = 'mixed'
         if isinstance(jsrelu, str) and jsrelu == 'mixed':
             mixed_activation_maker = lambda: ActivationPosition(MixedActivation(CustomizedReLU(), JumpingSquaredReLU()))
@@ -190,7 +191,7 @@ class Sparsify:
             main = MagicSynapse.plug_in(model=main, rho=self.rho, filter=self.magic_synapse_filter)
             print("MagicSynapse: Finished")
         
-        model = self._make_model(main, finetuning, has_obs=True).to(device)
+        model = self._make_model(main, finetuning, has_obs=True, use_mixed_activation=(jsrelu == 'mixed')).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
         model.epoch = start_epoch

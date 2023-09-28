@@ -667,6 +667,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--lora", action="store_true")
     parser.add_argument("--lora-r", type=int, default=16)
     parser.add_argument("--activation-mixing-epoch", type=int, default=10)
+    parser.add_argument("--mixed-activation", action="store_true")
     return parser
 
 
