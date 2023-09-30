@@ -18,7 +18,7 @@ class Sparsify:
         db_mlp_shape=None,
         rho=0.1,
         log_per_step=10,
-        mixed_scheduling={'max_epoch': None, 'max_iteration': None},
+        scheduling={'activation_mixing_iteration': None, 'layernorm_uplifting_iteration': None},
         lora_r=None,
         model_type=Model, 
         wrapper_type=Wrapper,
@@ -38,13 +38,13 @@ class Sparsify:
         self.db_mlp_shape = db_mlp_shape
         self.rho = rho
         self.log_per_step = log_per_step
-        self.mixed_scheduling = mixed_scheduling
+        self.scheduling = scheduling
         self.lora_r = lora_r
 
         if self.restricted_affine is None:
             self.restricted_affine = self.db_mlp
 
-        print(self.mixed_scheduling)
+        print(self.scheduling)
 
 
     
@@ -95,13 +95,17 @@ class Sparsify:
 
     def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False):
         obs: 'list[torch.nn.Module]' = [
-            RestrictAffinePlugin(log_per_step=self.log_per_step, finetuning=(finetuning is not None)) if self.restricted_affine else None,
+            RestrictAffinePlugin(
+                log_per_step=self.log_per_step, 
+                finetuning=(finetuning is not None), 
+                uplift_iterations=self.scheduling['layernorm_uplifting_iteration']
+            ) if self.restricted_affine else None,
             ActivationDistributionPlugin(self.mlp_types, self.log_per_step),
             ZerothBiasPlugin(self.zeroth_bias_clipping, log_per_step=self.log_per_step) if self.db_mlp else None,
             SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
             EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
             VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=self.log_per_step),
-            LinearActivationMixing(**self.mixed_scheduling) if use_mixed_activation else None,
+            LinearActivationMixing(max_iteration=self.scheduling['activation_mixing_iteration']) if use_mixed_activation else None,
         ]
         if not has_obs:
             for ob in obs:

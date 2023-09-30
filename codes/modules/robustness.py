@@ -75,10 +75,11 @@ try:
         """
             restrict the scaling factors of LayerNorm layers preceeding zeroth biases
         """
-        def __init__(self, log_per_step=1, finetuning=False):
+        def __init__(self, log_per_step=1, finetuning=False, uplift_iterations=None):
             super().__init__()
             self.log_per_step = log_per_step
             self.finetuning = finetuning
+            self.uplift_iteration = uplift_iterations
         def register(self, main: BaseModule, plugins: 'list[Plugin]'):
             self.main = ModuleReference(main)
             count = 0
@@ -93,17 +94,25 @@ try:
                             ln.bias.requires_grad = False
                     count += 1
             print(f"RestrictedAffine: {count} LayerNorm layers are restricted")
-        def after_backward(self):
-            if self.finetuning:
-                return
+        def clamp(self, ln: nn.LayerNorm):
+            ln.weight.clamp_(min=1)
+        def uplift(self, ln: nn.LayerNorm):
+            delta = (1 - ln.weight.abs()).clamp(min=0) / self.uplift_iteration
+            sign = (ln.weight.sign() >= 0).float()
 
+            ln.weight.add_(sign * delta)
+
+        def after_backward(self):
             with torch.no_grad():
                 for m in self.main.modules():
                     if not isinstance(m, ZerothBias):
                         continue
                     ln: nn.LayerNorm = m.layer_norm.main
                     if hasattr(ln, 'weight') and ln.weight is not None:
-                        ln.weight.clamp_(min=1)
+                        if not self.finetuning:
+                            self.clamp(ln)
+                        else:
+                            self.uplift(ln)
                         if self.iteration % self.log_per_step == 0:
                             self.losses.observe(ln.weight.abs().mean(), 'restricted_LayerNorm_scaling_factors')
         

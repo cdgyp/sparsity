@@ -23,5 +23,6 @@ do
         --finetune runs/finetuning/start/start.pth \
         --lora --lora-r 192  \
         --activation-mixing-epoch 5 \
+        --layernorm-uplifting-epoch 5 \
         "$@"
 done
