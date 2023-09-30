@@ -97,7 +97,7 @@ try:
         def clamp(self, ln: nn.LayerNorm):
             ln.weight.clamp_(min=1)
         def uplift(self, ln: nn.LayerNorm):
-            delta = (1 - ln.weight.abs()).clamp(min=0) / self.uplift_iteration
+            delta = (1 - ln.weight.abs() > 0).float().div_(self.uplift_iteration)
             sign = (ln.weight.sign() >= 0).float()
 
             ln.weight.add_(sign * delta)
