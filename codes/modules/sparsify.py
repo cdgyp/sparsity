@@ -219,5 +219,7 @@ class Sparsify:
         for name, p in model.named_parameters():
             if p.requires_grad:
                 print(name)
+        for name, m in model.named_modules():
+            if isinstance(m, ActivationPosition): print(m)
 
         return model, writer, writer.logdir
