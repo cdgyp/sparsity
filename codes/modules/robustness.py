@@ -96,9 +96,16 @@ try:
             print(f"RestrictedAffine: {count} LayerNorm layers are restricted")
         def clamp(self, ln: nn.LayerNorm):
             ln.weight.clamp_(min=1)
+        def hard_uplift(self, ln: nn.LayerNorm):
+            sign = (ln.weight.sign() + 0.1).sign().float()
+            abs_weight = ln.weight.abs()
+            uplifted_abs_weight = abs_weight.clamp(min(self.iteration / self.uplift_iteration, 1))
+            ln.weight.copy_(sign * uplifted_abs_weight)
+            
+
         def uplift(self, ln: nn.LayerNorm):
-            delta = (1 - ln.weight.abs()).clamp(min=0) / self.uplift_iteration
-            sign = (ln.weight.sign() >= 0).float()
+            delta = ((1 - ln.weight.abs()) > 0).float().div_(self.uplift_iteration)
+            sign = (ln.weight.sign() + 0.1).sign().float()
 
             ln.weight.add_(sign * delta)
 
@@ -112,7 +119,7 @@ try:
                         if not self.finetuning:
                             self.clamp(ln)
                         else:
-                            self.uplift(ln)
+                            self.hard_uplift(ln)
                         if self.iteration % self.log_per_step == 0:
                             self.losses.observe(ln.weight.abs().mean(), 'restricted_LayerNorm_scaling_factors')
         
