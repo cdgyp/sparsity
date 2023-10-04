@@ -179,6 +179,19 @@ class TrainingArguments:
                 d[k] = f"<{k.upper()}>"
         return d
 
+@dataclass
+class FinetuningArguments:
+    mixed_activation: bool = field(default=False, metadata={"help": "Wheter to mix activation functions in order to gradually adapt the replaced activation functions"})
+    activation_mixing_steps: int = field(default=3000)
+    layernorm_uplifting_steps: int = field(default=3000)
+    finetune: str = field(default=None)
+    lora_r: int = field(default=192)
+    vocab_size: int = field(default=None)
+
+    def __post_init__(self):
+        self.activation_mixing_steps = int(self.activation_mixing_steps)
+        self.layernorm_uplifting_steps = int(self.layernorm_uplifting_steps)
+
 
 @dataclass
 class ModelArguments:
@@ -582,6 +595,8 @@ class HfModel(Model):
         for p in self.plugins:
             if hasattr(p, 'gradient_checkpointing_disable'):
                 p.gradient_checkpointing_disable()
+    def get_input_embeddings(self):
+        return self.main.get_input_embeddings()
 class HfWrapper(Wrapper):
     supports_gradient_checkpointing=True
     def __init__(self, model):
@@ -591,10 +606,12 @@ class HfWrapper(Wrapper):
         self.model.gradient_checkpointing_enable()
     def gradient_checkpointing_disable(self):
         self.model.gradient_checkpointing_disable()
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
 
 class T5Sparsify(Sparsify):
-    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, mixed_scheduling=..., lora_r=None, model_type=..., wrapper_type=...) -> None:
-        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, mixed_scheduling, lora_r, HfModel, HfWrapper)
+    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={"activation_mixing_iteration":None, "layernorm_uplifting_iteration": None}, lora_r=None) -> None:
+        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, scheduling, lora_r, HfModel, HfWrapper)
         self.mlp_types = [T5DenseActDense]
 
     def extract_linear_layers(self, mlp: T5DenseActDense) -> 'dict[str, torch.nn.Linear]':
@@ -611,15 +628,21 @@ class T5Sparsify(Sparsify):
         return model
 
     def replace_activations(self, model: torch.nn.Module, jsrelu, path='model'):
+        if isinstance(jsrelu, str):
+            jsrelu = (jsrelu.lower() == 'jsrelu' or jsrelu.lower() == 'jumpring_squared_relu')
+        if isinstance(jsrelu, bool):
+            if jsrelu:
+                make_act = lambda: ActivationPosition(JumpingSquaredReLU())
+            else:
+                make_act = lambda: ActivationPosition(CustomizedReLU())
+        else:
+            make_act = jsrelu
+            
         for name, module in model.named_children():
             p = '.'.join([path, name])
             if isinstance(module, T5DenseActDense):
-                if jsrelu:
-                    setattr(module, 'act', ActivationPosition(JumpingSquaredReLU()))
-                else:
-                    setattr(module, 'act', ActivationPosition(CustomizedReLU()))
-                
-                self.activations.append(p + ': ' + str(main.__class__))
+                setattr(module, 'act', make_act())
+                self.activations.append(p + ': ' + str(module.__class__))
             else:
                 self.replace_activations(module, jsrelu=jsrelu, path=p)
         return model
@@ -627,7 +650,32 @@ class T5Sparsify(Sparsify):
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
         return '.DenseReluDense.' in name and '.wi' in name
 
-def get_model(config, tokenizer, model_args: ModelArguments, training_args: TrainingArguments, inputs_length, targets_length):
+    def load_checkpoint(self, model: torch.nn.Module, path: str, strict: bool):
+        path = os.path.join(path, 'pytorch_model.bin')
+        checkpoint = torch.load(path, map_location="cpu")
+        sd = checkpoint
+        if 'main.model.conv_proj.weight' not in model.state_dict():
+            sd = {}
+            for key, value in checkpoint.items():
+                key: str
+                if 'conv_proj' in key:
+                    key = key.replace('conv_proj', 'conv_proj.conv')
+                sd[key] = value
+        try:
+            matching_status = model.load_state_dict(sd, strict=strict)
+        except:
+            matching_status = model.main.model.load_state_dict(sd, strict=strict)
+        unignorable_unexpected_keys = [
+            unexpected_keys 
+            for unexpected_keys in matching_status.unexpected_keys 
+            if unexpected_keys not in model.main.model._keys_to_ignore_on_load_unexpected
+        ]
+        assert len(unignorable_unexpected_keys) == 0, (unignorable_unexpected_keys, model.main.model._keys_to_ignore_on_load_unexpected)
+        assert all(['lora' in key or key in model.main.model._tied_weights_keys for key in matching_status.missing_keys]), (matching_status.unexpected_keys, [key for key in matching_status.missing_keys if 'lora' not in key and key not in model.main.model._tied_weights_keys])
+
+        return model
+
+def get_model(config, tokenizer, model_args: ModelArguments, training_args: TrainingArguments, finetuning_args: FinetuningArguments, inputs_length, targets_length):
     
     if model_args.model_name_or_path:
         T5 = T5ForConditionalGeneration.from_pretrained(
@@ -635,13 +683,15 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
             config=config,
         )
     else:
-        config.vocab_size = len(tokenizer)
+        if finetuning_args.finetune is None:
+            config.vocab_size = len(tokenizer)
         T5 = T5ForConditionalGeneration(
             config,
         )
 
     from ...modules.hooks import ActivationHook
     ActivationHook.max_batch_size = training_args.max_obs_batch_size
+
 
     model, writer, output_dir = T5Sparsify(
         db_mlp=model_args.db_mlp,
@@ -652,18 +702,31 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         db_mlp_shape=[max(inputs_length, targets_length), T5.config.d_model],
         rho=model_args.magic_synapse_rho,
         log_per_step=training_args.logging_steps,
+        scheduling={"activation_mixing_iteration": finetuning_args.activation_mixing_steps, "layernorm_uplifting_iteration": finetuning_args.layernorm_uplifting_steps},
+        lora_r=finetuning_args.lora_r,
     )(
-        'T5', training_args.title,
+        'T5', 
+        training_args.title,
         T5,
+        resume=training_args.resume,
+        finetuning=finetuning_args.finetune,
         steps=0,
         start_epoch=0,
-        resume=training_args.resume,
         device=int(os.environ['RANK']) if 'RANK' in os.environ else 0,
-        tensorboard_server=False
+        tensorboard_server=False,
+        mixed_activation=finetuning_args.mixed_activation
     )
 
     model.config = T5.config
     training_args.output_dir = output_dir
+
+    if finetuning_args.finetune is not None and training_args.gradient_checkpointing:
+        # https://github.com/huggingface/transformers/issues/23170
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+
+        model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    
     return model, writer
     
 
@@ -852,14 +915,14 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, FinetuningArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_arg, finetuning_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    model_args: ModelArguments; data_args: DataTrainingArguments; trainer_argument: TrainingArguments
+        model_args, data_args, training_args, finetuning_args = parser.parse_args_into_dataclasses()
+    model_args: ModelArguments; data_args: DataTrainingArguments; trainer_argument: TrainingArguments; finetuning_args: FinetuningArguments
 
     if model_args.use_auth_token is not None:
         warnings.warn("The `use_auth_token` argument is deprecated and will be removed in v4.34.", FutureWarning)
@@ -1002,13 +1065,18 @@ def main():
         )
 
     if model_args.config_name:
+        params = {
+            "cache_dir": model_args.cache_dir,
+            "vocab_size": len(tokenizer),
+            "token": model_args.token,
+            "torch_dtype": getattr(torch, model_args.dtype),
+        }
         config = T5Config.from_pretrained(
             model_args.config_name,
-            cache_dir=model_args.cache_dir,
-            vocab_size=len(tokenizer),
-            token=model_args.token,
-            torch_dtype=getattr(torch, model_args.dtype),
+            **params
         )
+        if finetuning_args.vocab_size is not None:
+            config.vocab_size = finetuning_args.vocab_size
     elif model_args.model_name_or_path:
         config = T5Config.from_pretrained(
             model_args.model_name_or_path,
@@ -1062,7 +1130,7 @@ def main():
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
-    model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
+    model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, finetuning_args=finetuning_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
     loss_manager = model.losses
 
     # Data collator

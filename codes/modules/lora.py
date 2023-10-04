@@ -691,7 +691,7 @@ class LoRAfy:
         for name, module in model.named_children():
             p = '.'.join([path, name])
             if isinstance(module, torch.nn.Linear) and not isinstance(module, lora.LoRALayer):
-                if 'mlp' in p.lower() or 'head' in p.lower():
+                if 'mlp' in p.lower() or 'head' in p.lower() or module.__class__ == torch.nn.Linear:
                     lora_linear = lora.Linear(module.in_features, module.out_features, r=self.r, bias=(module.bias is not None))
                     setattr(model, name, lora_linear)
                     self.linears.append(p + ': ' + str(module.__class__))
@@ -756,12 +756,13 @@ class LoRAfy:
                 for p in m.parameters():
                     print("LoRa: unfreeze", name)
                     p.requires_grad = True
-            if isinstance(m, torch.nn.LayerNorm) and hasattr(m, 'weight'):
+            if (isinstance(m, torch.nn.LayerNorm) or 'layernorm' in m.__class__.__name__.lower()) and hasattr(m, 'weight'):
                 print("LoRa: unfreeze scaling factors of", name)
                 m.weight.requires_grad = True
             if isinstance(m, LoRAMultiheadAttention):
                 for mm in m.modules():
                     if isinstance(mm, lora.Linear):
+                        # mm's weight is frozen zero, because the real weight is directly owned by torchvision's MultiheadAttention
                         mm.weight.requires_grad = False
             if isinstance(m, torch.nn.Linear):
                 assert not m.weight.requires_grad

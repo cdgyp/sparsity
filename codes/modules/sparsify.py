@@ -203,7 +203,7 @@ class Sparsify:
             main = MagicSynapse.plug_in(model=main, rho=self.rho, filter=self.magic_synapse_filter)
             print("MagicSynapse: Finished")
         
-        model = self._make_model(main, finetuning, has_obs=True, use_mixed_activation=(jsrelu == 'mixed')).to(device)
+        model = self._make_model(main, finetuning, has_obs=True, use_mixed_activation=mixed_activation).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
         model.epoch = start_epoch
