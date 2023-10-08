@@ -218,12 +218,12 @@ class CorrelationRecorder(BaseModule):
 
         sigma = ((g - mean.unsqueeze(dim=0))**2).mean(dim=0).sqrt()
         e_xy = einsum(
+            'b i d, b j d   ->  i j d',
             g,      g,
-            'b i d, b j d   ->  i j d'
         ) / g.shape[0]
         ex_ey = einsum(
+            'i d,   j d     ->  i j d',
             mean,   mean,
-            'i d,   j d     ->  i j d'
         )
         cov = e_xy - ex_ey
 
@@ -463,13 +463,13 @@ class SimilarityPlugin(Plugin):
             value = self.retranspose(value_linear.weight)
 
             kkT = einsum(
+                'i d,   j d     ->  i j',
                 key, key,
-                'i d,   j d     ->  i j'
             ).flatten()
 
             vvT = einsum(
+                'i d,   j d     ->  i j',
                 value, value,
-                'i d,   j d     ->  i j'
             ).flatten()
             
             pearson = torch.corrcoef(
@@ -628,8 +628,8 @@ class MkkTPlugin(HookingPlugin):
             return x.sum(dim=-1) ** 2
         else:
             return einsum(
+            '... i, i j, ... j  -> ...',
             x, M, x,
-            '... i, i j, ... j  -> ...'
         )
     def diagonalsum(self, x: torch.Tensor, M: torch.Tensor=None):
         if M is None:
@@ -660,8 +660,8 @@ class DiagonalityPlugin(MkkTPlugin):
             g = h.get()
             key = self.get_weight_matrix(mlp, 'key')
             kkT = einsum(
+                'i d,   j d     ->  i j',
                 key, key,
-                'i d,   j d     ->  i j'
             )
             
             for p in [1, 2]:
@@ -702,8 +702,8 @@ class SpectralObservationPlugin(MkkTPlugin):
     
     def spectral_properties(g, K, ratio_threshold=0.1, eps=1e-32) -> 'dict[str, Union[torch.Tensor, dict[str, torch.Tensor]]]':
         kkT = einsum(
+            '... i d, ... j d -> ... i j',
             K.float(), K.float(),
-            '... i d, ... j d -> ... i j'
         )
         trace = (kkT * torch.eye(kkT.shape[-1], device=kkT.device).unsqueeze(dim=0)).sum(dim=(-1, -2))
         eigenvalues_kkT = SpectralObservationPlugin.eigenvalues(kkT).clamp(min=0)
