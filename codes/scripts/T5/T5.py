@@ -53,7 +53,7 @@ from transformers.training_args import TrainingArguments
 # from flax.training import train_state
 # from flax.training.common_utils import get_metrics, onehot, shard
 from huggingface_hub import Repository, create_repo
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from torch.distributed import get_rank
 from random import shuffle
 
@@ -614,9 +614,10 @@ class HfWrapper(Wrapper):
         return self.model.get_input_embeddings()
 
 class T5Sparsify(Sparsify):
-    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={"activation_mixing_iteration":None, "layernorm_uplifting_iteration": None}, lora_r=None) -> None:
+    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={"activation_mixing_iteration":None, "layernorm_uplifting_iteration": None}, lora_r=None, do_train=True) -> None:
         super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, scheduling, lora_r, HfModel, HfWrapper)
         self.mlp_types = [T5DenseActDense]
+        self.do_train = do_train
 
     def extract_linear_layers(self, mlp: T5DenseActDense) -> 'dict[str, torch.nn.Linear]':
         return {
@@ -678,6 +679,37 @@ class T5Sparsify(Sparsify):
         assert all(['lora' in key or key in model.main.model._tied_weights_keys for key in matching_status.missing_keys]), (matching_status.unexpected_keys, [key for key in matching_status.missing_keys if 'lora' not in key and key not in model.main.model._tied_weights_keys])
 
         return model
+    
+    def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False):
+        from ...modules.hooks import ActivationDistributionPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin, VGradientObservationPlugin
+        from ...modules.robustness import RestrictAffinePlugin, ZerothBiasPlugin
+        from ...modules.activations import LinearActivationMixing
+        obs: 'list[torch.nn.Module]' = [
+            RestrictAffinePlugin(
+                log_per_step=self.log_per_step, 
+                finetuning=(finetuning is not None), 
+                uplift_iterations=self.scheduling['layernorm_uplifting_iteration']
+            ) if self.restricted_affine else None,
+            ActivationDistributionPlugin(self.mlp_types, self.log_per_step),
+            ZerothBiasPlugin(self.zeroth_bias_clipping, log_per_step=self.log_per_step) if self.db_mlp else None,
+        ] + ([
+            SpectralIncreasePlugin(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
+            EffectiveGradientSparsity(self.mlp_types, self.extract_linear_layers, log_per_step=self.log_per_step),
+            VGradientObservationPlugin(mlp_types=self.mlp_types, log_per_step=self.log_per_step),
+            LinearActivationMixing(max_iteration=self.scheduling['activation_mixing_iteration']) if use_mixed_activation else None,
+        ] if self.do_train else [])
+        if not has_obs:
+            for ob in obs:
+                if ob is not None:
+                    assert len(list(ob.parameters())) == 0
+            obs = []
+        
+        model = self.model_type(
+            self.wrapper_type(model),
+            *obs
+        )
+
+        return model
 
 def get_model(config, tokenizer, model_args: ModelArguments, training_args: TrainingArguments, finetuning_args: FinetuningArguments, inputs_length, targets_length):
     
@@ -708,6 +740,7 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         log_per_step=training_args.logging_steps,
         scheduling={"activation_mixing_iteration": finetuning_args.activation_mixing_steps, "layernorm_uplifting_iteration": finetuning_args.layernorm_uplifting_steps},
         lora_r=finetuning_args.lora_r,
+        do_train=training_args.do_train
     )(
         'T5', 
         training_args.title,
@@ -718,7 +751,7 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         start_epoch=0,
         device=int(os.environ['RANK']) if 'RANK' in os.environ else 0,
         tensorboard_server=False,
-        mixed_activation=finetuning_args.mixed_activation
+        mixed_activation=finetuning_args.mixed_activation,
     )
 
     model.config = T5.config
@@ -1252,10 +1285,21 @@ def main():
     else:
         if not (not training_args.do_train and training_args.do_eval):
             raise ValueError("Evaluation and no training are assumed under scanning evaluation")
-        for checkpoint in os.listdir(etc_arguments.dir_to_checkpoints):
-            trainer.train(
-                resume_from_checkpoint=os.path.join(etc_arguments.dir_to_checkpoints, checkpoint)
-            )
+        with torch.no_grad():
+            for checkpoint in tqdm(os.listdir(etc_arguments.dir_to_checkpoints)):
+                checkpoint = os.path.join(etc_arguments.dir_to_checkpoints, checkpoint)
+                trainer_argument.resume_from_checkpoint = checkpoint
+                trainer = CustomSeq2SeqTrainer(
+                    model=model,
+                    args=trainer_argument,
+                    data_collator=data_collator,
+                    train_dataset=tokenized_datasets["train"],
+                    eval_dataset=tokenized_datasets["validation"],
+                    compute_metrics=metric.compute_metrics,
+                    preprocess_logits_for_metrics=metric.preprocess_logits_for_metrics,
+                    optimizers=optimizer_scheduler,
+                )
+                trainer.evaluate()
 
 
 if __name__ == "__main__":

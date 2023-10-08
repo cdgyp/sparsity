@@ -75,6 +75,7 @@ class ActivationMapHook(ForwardHook):
         if self.gradient_checkpointing and (len(self.activations) > 0 or len(self.pre_activations) > 0):
             return
         
+
         with torch.no_grad():
             if output.is_sparse or output.is_sparse_csr:
                 self.activations.append(output[:self.max_batch_size].to_dense())
