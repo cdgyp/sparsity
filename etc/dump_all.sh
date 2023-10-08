@@ -1,28 +1,51 @@
 # Experiments for Productivity
 
-for model_type in vanilla sparsified;
+for full_exp_type in "T5/finetuning from_scratch" "imagenet1k/from_scratch5 finetuning_hard_uplifting";
 do
-    for activation_type in activation pre_activation;
+    IFS='/' read -ra parts <<< "$full_exp_type"
+    task="${parts[0]}"
+    trials="${parts[1]}"
+    for trial in $trials;
     do
-        for stage_type in train test;
+        if [ $trial == from_scratch5 ]; then
+            output_trial=from_scratch
+        elif [ $trial == finetuning_hard_uplifting ]; then
+            output_trial=finetuning
+        else
+            output_trial=$trial
+        fi
+        for model_type in vanilla sparsified;
         do
-            python etc/dump.py --source-dir runs/imagenet1k/from_scratch5/$model_type/*/activation_concentration_\($stage_type\)/\[obs\]$activation_type --output-dir dumps/imagenet1k/$model_type/$activation_type
+            for activation_type in activation pre_activation;
+            do
+                for stage_type in train test;
+                do
+                    python etc/dump.py --source-dir runs/$task/$trial/$model_type/*/activation_concentration_*${stage_type}*/?obs?$activation_type --output-dir dumps/$task/$output_trial/$model_type/$activation_type
+                done
+            done
+
+            if [ $task == imagenet1k ]; then
+                for stage_type in "" test_;
+                do
+                    for top_type in 1 5;
+                    do
+                        python etc/dump.py --source-dir runs/$task/$trial/$model_type/*/${stage_type}acc/ --output-dir dumps/$task/$output_trial/$model_type/
+                    done
+                done
+            else
+                python etc/dump.py --source-dir runs/$task/$trial/$model_type/*/eval_metrics/ --output-dir dumps/$task/$output_trial/$model_type/
+            fi
+
+            for matrix_type in kkT M;
+            do
+
+                python etc/dump.py --source-dir runs/$task/$trial/$model_type/*/spectral_increase/?obs?$matrix_type --output-dir dumps/$task/$output_trial/$model_type/spectral_increase/$matrix_type
+
+            done
+            python etc/dump.py --source-dir runs/$task/$trial/$model_type/*/norm_g_V --output-dir dumps/$task/$output_trial/$model_type/norm_g_V
+
+            python etc/dump.py --source-dir runs/$task/$trial/$model_type/ --output-dir dumps/$task/$output_trial/$model_type/etc/
         done
-    done
-
-    for stage_type in "" test_;
-    do
-        for top_type in 1 5;
-        do
-            python etc/dump.py --source-dir runs/imagenet1k/from_scratch5/$model_type/*/${stage_type}acc/ --output-dir dumps/imagenet1k/$model_type/
-        done
-    done
-
-    for matrix_type in kkT M;
-    do
-
-        python etc/dump.py --source-dir runs/imagenet1k/from_scratch5/$model_type/*/spectral_increase/\[obs\]$matrix_type --output-dir dumps/imagenet1k/$model_type/spectral_increase
-
     done
 done
 

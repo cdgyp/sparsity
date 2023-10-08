@@ -53,6 +53,7 @@ def tabulate_events(dpath, filter=None):
     print(dpath)
 
     summary_iterators = [EventAccumulator(os.path.join(dpath, dname)).Reload() for dname in os.listdir(dpath) if os.path.isdir(os.path.join(dpath, dname)) and _filter(dname)]
+    summary_iterators = [it for it in summary_iterators if len(it.Tags()['scalars']) > 0]
     summary_iterators = sorted(summary_iterators, key=lambda acc: get_subtag(acc))
 
     tags = summary_iterators[0].Tags()['scalars']
@@ -87,4 +88,5 @@ steps = tabulate_events(args.source_dir, filter=args.filter_dname)
 # Save each tag to a separate CSV
 os.makedirs(args.output_dir, exist_ok=True)
 for tag, df in steps.items():
-    df.to_csv(os.path.join(args.output_dir, f"{tag}.csv"))
+    ttag = tag.replace('/', '_')
+    df.to_csv(os.path.join(args.output_dir, f"{ttag}.csv"))

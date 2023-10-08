@@ -116,7 +116,6 @@ class TrainingArguments:
     )
     do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
     do_eval: bool = field(default=True, metadata={"help": "Whether to run eval on the dev set."})
-    scan_eval: bool = field(default=None, metadata={"help": "Evaluate all checkpoints. If this option is turned on, then `resume` indicates the directory holding all checkpoints instead of a single one"})
     per_device_train_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training when not logging."}
     )
@@ -191,6 +190,11 @@ class FinetuningArguments:
     def __post_init__(self):
         self.activation_mixing_steps = int(self.activation_mixing_steps)
         self.layernorm_uplifting_steps = int(self.layernorm_uplifting_steps)
+
+@dataclass
+class EtcArguments:
+    scan_eval: bool = field(default=None, metadata={"help": "Evaluate all checkpoints. If this option is turned on, then `resume` indicates the directory holding all checkpoints instead of a single one"})
+    dir_to_checkpoints: str = field(default=None)
 
 
 @dataclass
@@ -915,14 +919,14 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, FinetuningArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, FinetuningArguments, EtcArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_arg, finetuning_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_arg, finetuning_args, etc_arguments = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args, finetuning_args = parser.parse_args_into_dataclasses()
-    model_args: ModelArguments; data_args: DataTrainingArguments; trainer_argument: TrainingArguments; finetuning_args: FinetuningArguments
+        model_args, data_args, training_args, finetuning_args, etc_arguments = parser.parse_args_into_dataclasses()
+    model_args: ModelArguments; data_args: DataTrainingArguments; trainer_argument: TrainingArguments; finetuning_args: FinetuningArguments; etc_arguments: EtcArguments
 
     if model_args.use_auth_token is not None:
         warnings.warn("The `use_auth_token` argument is deprecated and will be removed in v4.34.", FutureWarning)
@@ -1241,16 +1245,16 @@ def main():
     trainer.add_callback(LoggingCallback(resume=(training_args.resume is not None)))
     logging.getLogger("tensorboard").setLevel(logging.WARNING)
 
-    if not training_args.scan_eval:
+    if not etc_arguments.scan_eval:
         trainer.train(
             resume_from_checkpoint=training_args.resume
         )
     else:
-        if not (not training_args.do_train and  training_args.do_eval):
+        if not (not training_args.do_train and training_args.do_eval):
             raise ValueError("Evaluation and no training are assumed under scanning evaluation")
-        for checkpoint in os.listdir(training_args.resume):
+        for checkpoint in os.listdir(etc_arguments.dir_to_checkpoints):
             trainer.train(
-                resime_from_checkpoint=os.path.join(training_args.resume, checkpoint)
+                resume_from_checkpoint=os.path.join(etc_arguments.dir_to_checkpoints, checkpoint)
             )
 
 
