@@ -852,7 +852,7 @@ class CrossEntropyMetric(TbMetric):
 class LoggingCallback(TrainerCallback):
     def __init__(self, resume=False, eval_only=False) -> None:
         super().__init__()
-        self.resume = False
+        self.resume = resume
         self.eval_only = eval_only
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
@@ -1291,9 +1291,13 @@ def main():
         if not (not training_args.do_train and training_args.do_eval):
             raise ValueError("Evaluation and no training are assumed under scanning evaluation")
         with torch.no_grad():
-            for checkpoint in tqdm(os.listdir(etc_arguments.dir_to_checkpoints)):
-                checkpoint = os.path.join(etc_arguments.dir_to_checkpoints, checkpoint)
-                trainer_argument.resume_from_checkpoint = checkpoint
+            extract_step = lambda x: int(x.split('-')[-1])
+            for checkpoint in tqdm(sorted(os.listdir(etc_arguments.dir_to_checkpoints), key=extract_step)):
+                checkpoint_full_path = os.path.join(etc_arguments.dir_to_checkpoints, checkpoint, 'pytorch_model.bin')
+                model.load_state_dict(torch.load(checkpoint_full_path, 'cpu'), strict=True)
+                # model.to(int(os.environ['RANK']) if 'RANK' in os.environ else 0)
+                model.iteration = extract_step(checkpoint)
+                model.eval()
                 trainer = CustomSeq2SeqTrainer(
                     model=model,
                     args=trainer_argument,
@@ -1304,7 +1308,7 @@ def main():
                     preprocess_logits_for_metrics=metric.preprocess_logits_for_metrics,
                     optimizers=optimizer_scheduler,
                 )
-                trainer.add_callback(LoggingCallback(eval_only=True))
+                trainer.add_callback(LoggingCallback(eval_only=False))
                 trainer.evaluate()
 
 
