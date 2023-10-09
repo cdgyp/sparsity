@@ -850,9 +850,10 @@ class CrossEntropyMetric(TbMetric):
 
 
 class LoggingCallback(TrainerCallback):
-    def __init__(self, resume=False) -> None:
+    def __init__(self, resume=False, eval_only=False) -> None:
         super().__init__()
         self.resume = False
+        self.eval_only = eval_only
     def on_epoch_begin(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
         if self.resume:
@@ -888,6 +889,10 @@ class LoggingCallback(TrainerCallback):
 
     def on_evaluate(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
         model = kwargs['model']
+        if self.eval_only:
+            model.epoch = state.epoch
+            model.iteration = state.global_step
+
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.writer.flush()
         model.losses.reset()
@@ -1299,6 +1304,7 @@ def main():
                     preprocess_logits_for_metrics=metric.preprocess_logits_for_metrics,
                     optimizers=optimizer_scheduler,
                 )
+                trainer.add_callback(LoggingCallback(eval_only=True))
                 trainer.evaluate()
 
 
