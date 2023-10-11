@@ -133,7 +133,7 @@ MODELS=vanilla codes/scripts/imagenet1k/imagenet1k.sh --title from_scratch
 
 The results can be found under `runs/imagenet1k/from_scratch/`, where `sparsified` and `vanilla` hold results of modified and vanilla models.
 
-To finetuning from scratch, first select a checkpoint from vanilla training. For example, `runs/imagenet1k/from_scratch/vanilla/*/save/checkpoint.pth` is the newest checkpoint. Copy it to `runs/finetuning/start/start.pth`. Then run the following commands:
+To finetune from sparsity, first select a checkpoint from vanilla training. For example, `runs/imagenet1k/from_scratch/vanilla/*/save/checkpoint.pth` is the newest checkpoint. Copy it to `runs/finetuning/start/start.pth`. Then run the following commands:
 ```bash
 MODELS=sparsified codes/scripts/imagenet1k/finetuning.sh --title finetuning
 MODELS=vanilla codes/scripts/imagenet1k/finetuning.sh --title finetuning
@@ -149,18 +149,18 @@ To train from scratch, run
 MODELS=sparsified codes/scripts/T5/T5.sh --title from_scratch/sparsified
 MODELS=vanilla codes/scripts/T5/T5.sh --title from_scratch/vanilla
 ```
-The results can be found under `runs/T5/from_scratch`.
+The results can be found under `runs/T5/from_scratch/`.
 
 Before finetuning, copy a checkpoint from vanilla training. For example, copy or link `runs/T5/from_scratch/*/save/checkpoint-100000/pytorch_model.bin` to `start_points/t5-base/pytorch_model.bin`. Then run
 ```bash
 MODELS=sparsified codes/scripts/T5/finetuning.sh --title finetuning/sparsified
 MODELS=vanilla codes/scripts/T5/finetuning.sh --title finetuning/vanilla
 ```
-The results can be found under `runs/T5/finetuning`.
+The results can be found under `runs/T5/finetuning/`.
 
 ### Applicability of Theorem 8 (Sec 8.4)
 
-Since models are small but there are too many of them, the scripts of this experiments create a lot of parallel training processes. So be careful with the burden and adjust how trainings are paralleled in scripts before hand.
+Since models are small but there are too many of them, the scripts of this experiments create a lot of parallel training processes. So be careful with the burden and adjust how trainings are paralleled in scripts beforehand.
 One also needs to modify Line 12 in `codes/scripts/marchenko_pastur/no_parallel.sh` to use a proper environment.
 
 Run the following commands to parallelly train tiny MLPs:
@@ -170,4 +170,4 @@ DEVICE=cuda:1 PARTITION=2 TITLE=marchenko_pastur bash codes/scripts/marchenko_pa
 DEVICE=cuda:2 PARTITION=2_1 TITLE=marchenko_pastur bash codes/scripts/marchenko_pastur/half_parallel.sh
 DEVICE=cuda:3 PARTITION=2_2 TITLE=marchenko_pastur bash codes/scripts/marchenko_pastur/half_parallel.sh
 ```
-Results can be found under `runs/marchenko_pastur`
+Results can be found under `runs/marchenko_pastur/`
