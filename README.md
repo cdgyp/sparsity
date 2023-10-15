@@ -133,7 +133,7 @@ MODELS=vanilla codes/scripts/imagenet1k/imagenet1k.sh --title from_scratch
 
 The results can be found under `runs/imagenet1k/from_scratch/`, where `sparsified` and `vanilla` hold results of modified and vanilla models.
 
-To finetune from sparsity, first select a checkpoint from vanilla training. For example, `runs/imagenet1k/from_scratch/vanilla/*/save/checkpoint.pth` is the newest checkpoint. Copy it to `runs/finetuning/start/start.pth`. Then run the following commands:
+To finetune for sparsity, first select a checkpoint from vanilla training. For example, `runs/imagenet1k/from_scratch/vanilla/*/save/checkpoint.pth` is the newest checkpoint. Copy it to `runs/finetuning/start/start.pth`. Then run the following commands:
 ```bash
 MODELS=sparsified codes/scripts/imagenet1k/finetuning.sh --title finetuning
 MODELS=vanilla codes/scripts/imagenet1k/finetuning.sh --title finetuning
