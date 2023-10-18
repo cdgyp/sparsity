@@ -70,31 +70,93 @@ class FGSMExample(AdversarialExample):
 
 class AdversarialObservation(Plugin):
     class LinearHook:
-        def __init__(self, name=None) -> None:
+        def __init__(self, name=None, filter_threshold=None) -> None:
             self.inputs: torch.Tensor = None
             self.outputs: torch.Tensor = None
             self.weight: torch.Tensor = None
             self.name = name
+            self.pairing_dimension = None
+            self.filter_threshold = filter_threshold
         def clean(self):
             self.inputs = None
             self.outputs = None
             self.weight = None
+        def set_filter(self, pairing_dimension=None):
+            self.pairing_dimension = pairing_dimension
+
+        def hard_filter(self, eigen_val: torch.Tensor):
+            sorted_eigen_val = eigen_val.sort(dim=-1, descending=True)[0]
+            eigen_sum = torch.zeros(eigen_val.shape[: -1], device=eigen_val.device)
+            eigen_threshold = torch.zeros(eigen_val.shape[: -1], device=eigen_val.device)
+            for i in range(sorted_eigen_val.shape[-1]):
+                eigen_threshold = eigen_threshold.maximum(sorted_eigen_val[..., i] * (eigen_sum > self.filter_threshold))
+                eigen_sum += sorted_eigen_val[..., i]
+            print(((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1).mean(), eigen_val.sum(dim=-1).mean(),(((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1) >= self.filter_threshold * eigen_val.sum(dim=-1)).float().mean())
+            return (eigen_val >= eigen_threshold.unsqueeze(dim=-1)).float()
+        def soft_filter(self, eigen_val: torch.Tensor):
+            return eigen_val.sqrt()
         def __call__(self, module: nn.Linear, args, output) -> Any:
             self.weight = module.weight
             assert isinstance(args, tuple) and len(args) == 1
             self.inputs = args[0]
             self.outputs = output
 
-    def __init__(self, pairing_dimension='outer'):
+            if self.pairing_dimension is not None:
+                if self.pairing_dimension == 'outer':
+                    X: torch.Tensor = self.inputs.unflatten(0, [2, -1])[0]
+                    Zs: torch.Tensor = self.outputs.unflatten(0, [2, -1])
+                    DeltaZ = Zs[1] - Zs[0]
+                else:
+                    raise NotImplemented()
+                assert not X.requires_grad
+                XXT = torch.matmul(X, X.transpose(-1, -2))
+                eigen_val, eigen_vec = torch.linalg.eig(XXT)
+                eigen_val: torch.Tensor
+                eigen_vec: torch.Tensor
+                eigen_val = eigen_val.real.clamp(min=0)
+                eigen_vec = eigen_vec.real
+                if len(eigen_val.shape) == 1:
+                    return
+                if self.filter_threshold is not None:
+                    filtered_eigen_val = self.hard_filter(eigen_val)
+                else:
+                    filtered_eigen_val = self.soft_filter(eigen_val)
+                
+                diagonal_eigen_vec = torch.eye(eigen_vec.shape[-1], device=eigen_vec.device).unsqueeze(dim=0) * filtered_eigen_val.unsqueeze(dim=-1)
+                filter_XXT = torch.matmul(torch.matmul(eigen_vec, diagonal_eigen_vec), eigen_vec.transpose(-1, -2))
+                NewDeltaZ = torch.matmul(filter_XXT, DeltaZ)
+                if self.filter_threshold is not None:
+                    scaled_NewDeltaZ = NewDeltaZ
+                    print(NewDeltaZ.norm(dim=[-1, -2]).mean(), DeltaZ.norm(dim=[-1, -2]).mean())
+                else:
+                    scaled_NewDeltaZ = NewDeltaZ * (DeltaZ.norm(dim=[-1, -2]) / NewDeltaZ.norm(dim=[-1, -2])).unsqueeze(dim=-1).unsqueeze(dim=-1)
+                if self.pairing_dimension == 'outer':
+                    self.outputs[len(self.outputs) // 2:] = self.outputs[:len(self.outputs) // 2] + scaled_NewDeltaZ
+                    return self.outputs
+                else:
+                    raise NotImplemented()
+
+
+
+
+    def __init__(self, pairing_dimension='outer', do_filtering=False, filter_threshold=None):
         super().__init__()
         self.hooks: 'list[AdversarialObservation.LinearHook]' = []
         self.paring_dimension = pairing_dimension
+        self.do_filtering = do_filtering
+        self.filter_threshold = filter_threshold
+    def set_filter(self, do_filtering: bool):
+        self.do_filtering = do_filtering
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
         for name, m in main.named_modules():
             if isinstance(m, nn.Linear):
-                h = self.LinearHook(name)
+                h = self.LinearHook(name, filter_threshold=self.filter_threshold)
                 m.register_forward_hook(h)
                 self.hooks.append(h)
+    def prepare(self, *args, **kwargs):
+        for h in self.hooks:
+            h.set_filter(self.paring_dimension if self.do_filtering else None)
+            h.filter_threshold = self.filter_threshold
     def entropy(self, X: torch.Tensor):
         X = X.abs()
         X = X / X.sum(dim=-1, keepdim=True)
@@ -147,12 +209,3 @@ class AdversarialObservation(Plugin):
 
             for h in self.hooks:
                 h.clean()
-            
-
-
-
-
-
-
-
-

@@ -39,6 +39,8 @@ def main():
     parser.add_argument('--title', type=str, required=True)
     parser.add_argument('--batch-size', type=int, required=True)
     parser.add_argument('--n-samples', type=int, required=True)
+    parser.add_argument('--do-filtering', action='store_true')
+    parser.add_argument('--filter-threshold', type=float, default=None, help="Defaults to None, meaning using soft spectral filtering")
     args = parser.parse_args()
 
     weight = ViT_B_16_Weights.DEFAULT
@@ -63,16 +65,25 @@ def main():
 
     full_model = Model(
         Wrapper(model),
-        AdversarialObservation(),
+        AdversarialObservation(do_filtering=args.do_filtering, filter_threshold=args.filter_threshold),
     ).to('cuda')
     full_model.losses = LossManager(writer=writer)
 
     adv_dataset = BaselineAdversarialPairDataset(X, adversarial_X, Ys)
 
     with torch.no_grad():
+        all_adv_acc = []
+        all_baseline_acc = []
         for (baseline_X, adv_X, Y) in tqdm(DataLoader(adv_dataset, int(args.batch_size // 2), False, drop_last=True, collate_fn=BaselineAdversarialPairDataset.collate_fn)):
             all_X = torch.cat([baseline_X, adv_X])
             pred = full_model(all_X.to('cuda'))
+            adv_acc = accuracy(pred[len(pred) // 2: ], Y)
+            baseline_acc = accuracy(pred[:len(pred) // 2], Y)
+            print("baseline_acc:", baseline_acc.mean(), "adv_acc:", adv_acc.mean())
+            all_adv_acc.append(adv_acc)
+            all_baseline_acc.append(baseline_acc)
+
+        print("all_baseline_acc:", float(torch.stack(all_baseline_acc).mean()), "all_adv_acc:", float(torch.stack(all_adv_acc).mean()))
 
     full_model.losses.log_losses(1)
     start_tensorboard_server(writer.logdir)
