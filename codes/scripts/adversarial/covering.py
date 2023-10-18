@@ -9,6 +9,7 @@ from torchvision.models.vision_transformer import vit_b_16, ViT_B_16_Weights
 from torchvision.transforms._presets import ImageClassification
 from ...base import Model, Wrapper, LossManager, new_experiment, start_tensorboard_server
 from tqdm.auto import tqdm
+from math import ceil
 
 def accuracy(pred: torch.Tensor, Y: torch.Tensor):
     return (pred.argmax(dim=-1) == Y).float()
@@ -40,6 +41,7 @@ def main():
     parser.add_argument('--batch-size', type=int, required=True)
     parser.add_argument('--n-samples', type=int, required=True)
     parser.add_argument('--do-filtering', action='store_true')
+    parser.add_argument('--log-per-step', type=int, default=10)
     parser.add_argument('--filter-threshold', type=float, default=None, help="Defaults to None, meaning using soft spectral filtering")
     args = parser.parse_args()
 
@@ -54,39 +56,46 @@ def main():
 
     
     adv = FGSMExample(dataloader, model, torch.nn.CrossEntropyLoss(), epsilon=args.epsilon, test_fn=accuracy)
-    X, adversarial_X, Ys, baseline_test, adversarial_test = adv.run(args.n_samples)
-    baseline_acc = baseline_test.mean()
-    adversarial_acc = adversarial_test.mean()
-    print(f"epsilon={args.epsilon}, baseline_acc={float(baseline_acc)}, adv_acc={float(adversarial_acc)}")
 
     writer, logdir = new_experiment('covering/' + args.title, args, dir_to_runs='runs')
+    start_tensorboard_server(writer.logdir)
 
     model.eval()
 
+    adversarial_plugin = AdversarialObservation(do_filtering=args.do_filtering, filter_threshold=args.filter_threshold)
+    adversarial_plugin.activated = False
     full_model = Model(
         Wrapper(model),
-        AdversarialObservation(do_filtering=args.do_filtering, filter_threshold=args.filter_threshold),
+        adversarial_plugin,
     ).to('cuda')
     full_model.losses = LossManager(writer=writer)
 
-    adv_dataset = BaselineAdversarialPairDataset(X, adversarial_X, Ys)
-
-    with torch.no_grad():
-        all_adv_acc = []
-        all_baseline_acc = []
-        for (baseline_X, adv_X, Y) in tqdm(DataLoader(adv_dataset, int(args.batch_size // 2), False, drop_last=True, collate_fn=BaselineAdversarialPairDataset.collate_fn)):
+    all_adv_acc = []
+    all_adv2_acc = []
+    all_baseline_acc = []
+    for t, (baseline_X, adv_X, Y, bl_test, adv_test) in enumerate(tqdm(adv.run(args.n_samples, True), total=min(ceil(args.n_samples / dataloader.batch_size), len(dataloader)))):
+        with torch.no_grad():
+            adversarial_plugin.activated = True
             all_X = torch.cat([baseline_X, adv_X])
             pred = full_model(all_X.to('cuda'))
-            adv_acc = accuracy(pred[len(pred) // 2: ], Y)
-            baseline_acc = accuracy(pred[:len(pred) // 2], Y)
-            print("baseline_acc:", baseline_acc.mean(), "adv_acc:", adv_acc.mean())
-            all_adv_acc.append(adv_acc)
-            all_baseline_acc.append(baseline_acc)
+            adv2_acc = accuracy(pred[len(pred) // 2: ], Y)
+            print("baseline_acc:", bl_test.mean(), "adv_acc:", adv_test.mean(), "adv2_acc:", adv2_acc.mean())
+            all_adv_acc.append(adv_test)
+            all_adv2_acc.append(adv2_acc)
+            all_baseline_acc.append(bl_test)
 
-        print("all_baseline_acc:", float(torch.stack(all_baseline_acc).mean()), "all_adv_acc:", float(torch.stack(all_adv_acc).mean()))
+            full_model.losses.observe(bl_test.mean(), "acc", "baseline")
+            full_model.losses.observe(adv_test.mean(), "acc", "adversarial")
+            full_model.losses.observe(adv2_acc.mean(), "acc", "adversarial2")
+            adversarial_plugin.activated = False
+            for h in adversarial_plugin.hooks:
+                h.activated = False
+        
+        if t % args.log_per_step == 0:
+            full_model.losses.log_losses(t) # ! don't call .reset()
 
-    full_model.losses.log_losses(1)
-    start_tensorboard_server(writer.logdir)
+    print("all_baseline_acc:", float(torch.stack(all_baseline_acc).mean()), "all_adv_acc:", float(torch.stack(all_adv_acc).mean()), "all_adv2_acc:", float(torch.stack(all_adv2_acc).mean()))
+
 
 
 
