@@ -2,7 +2,7 @@ from typing import Any
 import torch
 from torch  import nn
 from torch.utils.data import DataLoader
-from ..base import BaseModule, Plugin
+from ..base import BaseModule, Plugin, LossManager
 from tqdm.auto import tqdm
 from math import ceil, sqrt
 
@@ -80,7 +80,7 @@ class FGSMExample(AdversarialExample):
 
 class AdversarialObservation(Plugin):
     class LinearHook:
-        def __init__(self, name=None, filter_threshold=None) -> None:
+        def __init__(self, name=None, filter_threshold=None, losses:LossManager=None) -> None:
             self.inputs: torch.Tensor = None
             self.outputs: torch.Tensor = None
             self.weight: torch.Tensor = None
@@ -88,6 +88,7 @@ class AdversarialObservation(Plugin):
             self.pairing_dimension = None
             self.filter_threshold = filter_threshold
             self.activated = True
+            self.losses = losses
         def clean(self):
             self.inputs = None
             self.outputs = None
@@ -140,6 +141,8 @@ class AdversarialObservation(Plugin):
                 diagonal_eigen_vec = torch.eye(eigen_vec.shape[-1], device=eigen_vec.device).unsqueeze(dim=0) * filtered_eigen_val.unsqueeze(dim=-1)
                 filter_XXT = torch.matmul(torch.matmul(eigen_vec, diagonal_eigen_vec), eigen_vec.transpose(-1, -2))
                 NewDeltaZ = torch.matmul(filter_XXT, DeltaZ)
+                self.losses.observe((NewDeltaZ.norm(dim=[-1, -2]) / DeltaZ.norm(dim=[-1, -2])).mean(), 'norm_change_by_filtering')
+
                 if self.filter_threshold is not None:
                     scaled_NewDeltaZ = NewDeltaZ
                     # print(NewDeltaZ.norm(dim=[-1, -2]).mean(), DeltaZ.norm(dim=[-1, -2]).mean())
@@ -174,6 +177,7 @@ class AdversarialObservation(Plugin):
             h.set_filter(self.paring_dimension if self.do_filtering else None)
             h.filter_threshold = self.filter_threshold
             h.activated = self.activated
+            h.losses = self.losses
     def entropy(self, X: torch.Tensor):
         X = X.abs()
         X = X / X.sum(dim=-1, keepdim=True)
