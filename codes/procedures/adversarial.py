@@ -120,8 +120,8 @@ class AdversarialObservation(Plugin):
             if self.pairing_dimension is not None:
                 if self.pairing_dimension == 'outer':
                     X: torch.Tensor = self.inputs.unflatten(0, [2, -1])[0]
-                    Zs: torch.Tensor = self.outputs.unflatten(0, [2, -1])
-                    DeltaZ = Zs[1] - Zs[0]
+                    Zs: torch.Tensor = self.outputs.unflatten(0, [2, -1]) 
+                    DeltaZ = Zs[1] - Zs[0]  # since substracted, biases are canceled
                 else:
                     raise NotImplemented()
                 assert not X.requires_grad
@@ -193,7 +193,7 @@ class AdversarialObservation(Plugin):
                 if self.paring_dimension.lower() == 'outer':
                     outputs = h.outputs.unflatten(0, [2, -1])
                     inputs = h.inputs.unflatten(0, [2, -1])
-                    WDeltaX = outputs[1] - outputs[0] # [b, ..., k, n]
+                    WDeltaX = outputs[1] - outputs[0] # [b, ..., k, n]; since substracted, biases are canceled
                     X = inputs[0]   # [b, ..., k, d]
                 elif self.paring_dimension.lower() == 'inner':
                     outputs = h.outputs.unflatten(-3, [-1, 2])
