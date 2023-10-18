@@ -20,7 +20,13 @@ do
             do
                 for stage_type in train test;
                 do
-                    python etc/dump.py --source-dir runs/$task/$trial/$model_type/*/activation_concentration_*${stage_type}*/?obs?$activation_type --output-dir dumps/$task/$output_trial/$model_type/$activation_type
+                    if [[ "$task/$trial/$stage_type" == "T5/from_scratch/test" ]]; then
+                        dir=runs/$task/reeval/$model_type/*/activation_concentration_*${stage_type}*/?obs?$activation_type
+                        echo "!!!$dir -> dumps/$task/$output_trial/$model_type/$activation_type"
+                    else
+                        dir=runs/$task/$trial/$model_type/*/activation_concentration_*${stage_type}*/?obs?$activation_type
+                    fi
+                    python etc/dump.py --source-dir $dir --output-dir dumps/$task/$output_trial/$model_type/$activation_type
                 done
             done
 
