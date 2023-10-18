@@ -27,7 +27,7 @@ class AdversarialExample:
 
         return adversarial_X.data
 
-    def run(self, n_samples):
+    def run(self, n_samples, generator=False):
         self.model.eval()
         self.model.requires_grad_(False)
         
@@ -35,11 +35,13 @@ class AdversarialExample:
         res = []
         baseline = []
         Ys = []
-        baseline_test = []
-        adversarial_test = []
+        self.baseline_test = []
+        self.adversarial_test = []
         device = next(iter(self.model.parameters())).device
 
-        for (X, Y) in tqdm(self.dataloader, desc="Generating Adversarial Examples", total=min(ceil(n_samples / self.dataloader.batch_size), len(self.dataloader))):
+        iterator = tqdm(self.dataloader, desc="Generating Adversarial Examples", total=min(ceil(n_samples / self.dataloader.batch_size), len(self.dataloader))) if not generator else self.dataloader
+
+        for (X, Y) in iterator:
             if remained_samples <= 0:
                 break
             X = X[:remained_samples].to(device)
@@ -47,16 +49,24 @@ class AdversarialExample:
             remained_samples -= len(X)
             
             adversarial_X = self.generate_for_batch(X, Y)
-            res.append(adversarial_X)
-            baseline.append(X)
-            Ys.append(Y)
+            bl_test = torch.tensor(self.test_fn(self.model(X), Y))
+            adv_test = torch.tensor(self.test_fn(self.model(adversarial_X), Y))
+            if generator:
+                yield X, adversarial_X, Y, bl_test, adv_test
+            else:
+                res.append(adversarial_X)
+                baseline.append(X)
+                Ys.append(Y)
             if self.test_fn is not None:
-                baseline_test.append(torch.tensor(self.test_fn(self.model(X), Y)))
-                adversarial_test.append(torch.tensor(self.test_fn(self.model(adversarial_X), Y)))
-        if self.test_fn:
-            return torch.cat(baseline), torch.cat(res), torch.cat(Ys), torch.cat(baseline_test), torch.cat(adversarial_test)
+                self.baseline_test.append(bl_test)
+            self.adversarial_test.append(adv_test)
+        if not generator:
+            if self.test_fn:
+                return torch.cat(baseline), torch.cat(res), torch.cat(Ys), torch.cat(self.baseline_test), torch.cat(self.adversarial_test)
+            else:
+                return torch.cat(baseline), torch.cat(res), torch.cat(Ys)
         else:
-            return torch.cat(baseline), torch.cat(res), torch.cat(Ys)
+            return
     
 class FGSMExample(AdversarialExample):
     def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, epsilon: float, test_fn=None):
@@ -77,6 +87,7 @@ class AdversarialObservation(Plugin):
             self.name = name
             self.pairing_dimension = None
             self.filter_threshold = filter_threshold
+            self.activated = True
         def clean(self):
             self.inputs = None
             self.outputs = None
@@ -89,13 +100,17 @@ class AdversarialObservation(Plugin):
             eigen_sum = torch.zeros(eigen_val.shape[: -1], device=eigen_val.device)
             eigen_threshold = torch.zeros(eigen_val.shape[: -1], device=eigen_val.device)
             for i in range(sorted_eigen_val.shape[-1]):
-                eigen_threshold = eigen_threshold.maximum(sorted_eigen_val[..., i] * (eigen_sum > self.filter_threshold))
+                eigen_threshold = eigen_threshold.maximum(sorted_eigen_val[..., i] * (eigen_sum > self.filter_threshold * eigen_val.sum(dim=-1)))
                 eigen_sum += sorted_eigen_val[..., i]
-            print(((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1).mean(), eigen_val.sum(dim=-1).mean(),(((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1) >= self.filter_threshold * eigen_val.sum(dim=-1)).float().mean())
+            # print(((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1).mean(), eigen_val.sum(dim=-1).mean(),.float().mean())
+            assert all((((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1) >= self.filter_threshold * eigen_val.sum(dim=-1)))
             return (eigen_val >= eigen_threshold.unsqueeze(dim=-1)).float()
         def soft_filter(self, eigen_val: torch.Tensor):
             return eigen_val.sqrt()
         def __call__(self, module: nn.Linear, args, output) -> Any:
+            if not self.activated:
+                return
+            
             self.weight = module.weight
             assert isinstance(args, tuple) and len(args) == 1
             self.inputs = args[0]
@@ -127,7 +142,7 @@ class AdversarialObservation(Plugin):
                 NewDeltaZ = torch.matmul(filter_XXT, DeltaZ)
                 if self.filter_threshold is not None:
                     scaled_NewDeltaZ = NewDeltaZ
-                    print(NewDeltaZ.norm(dim=[-1, -2]).mean(), DeltaZ.norm(dim=[-1, -2]).mean())
+                    # print(NewDeltaZ.norm(dim=[-1, -2]).mean(), DeltaZ.norm(dim=[-1, -2]).mean())
                 else:
                     scaled_NewDeltaZ = NewDeltaZ * (DeltaZ.norm(dim=[-1, -2]) / NewDeltaZ.norm(dim=[-1, -2])).unsqueeze(dim=-1).unsqueeze(dim=-1)
                 if self.pairing_dimension == 'outer':
@@ -145,6 +160,7 @@ class AdversarialObservation(Plugin):
         self.paring_dimension = pairing_dimension
         self.do_filtering = do_filtering
         self.filter_threshold = filter_threshold
+        self.activated = True
     def set_filter(self, do_filtering: bool):
         self.do_filtering = do_filtering
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
@@ -157,11 +173,14 @@ class AdversarialObservation(Plugin):
         for h in self.hooks:
             h.set_filter(self.paring_dimension if self.do_filtering else None)
             h.filter_threshold = self.filter_threshold
+            h.activated = self.activated
     def entropy(self, X: torch.Tensor):
         X = X.abs()
         X = X / X.sum(dim=-1, keepdim=True)
         return -(X * X.log2()).sum(dim=-1)
     def forward(self, res: torch.Tensor, Y: torch.Tensor, labeled: torch.Tensor, D: torch.Tensor):
+        if not self.activated:
+            return
         with torch.no_grad():
             for i, h in enumerate(self.hooks):
                 if h.outputs is None:
