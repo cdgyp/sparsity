@@ -1,5 +1,12 @@
 # Experiments in "A Theoretical Explanation of Activation Sparsity through Flat Minima and Adversarial Robustness"
 
+## Initialization
+
+Use the following commands to pull submodules required by this repo:
+```bash
+git submodule update --init
+```
+
 ## File Structure
 
 ```bash
