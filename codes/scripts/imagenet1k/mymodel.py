@@ -21,7 +21,16 @@ class ImageNet1kSparsify(Sparsify):
             'key': mlp[0],
             'value': mlp[3]
         }
+        try:
+            assert all([isinstance(m, torch.nn.Linear) for m in linears.values()]), {key: m.__class__ for key, m in linears.items()}
+        except AssertionError:
+            from ...modules.magic import MagicSynapse
+            for k, v in linears.items():
+                if isinstance(v, MagicSynapse):
+                    assert not hasattr(v.linear, 'weight_attaching_to')
+                    linears[k] = v.linear
         assert all([isinstance(m, torch.nn.Linear) for m in linears.values()]), {key: m.__class__ for key, m in linears.items()}
+
         return linears
     
     def is_MLP(self, name: str, module: torch.nn.Module):
@@ -31,7 +40,13 @@ class ImageNet1kSparsify(Sparsify):
         setattr(module, 'mlp', db_mlp)
         return model
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
-        return '.mlp.' in name
+        if '.mlp.' in name:
+            return True
+        try:
+            import loralib as lora
+            return isinstance(module, lora.Linear) or isinstance(module, lora.MergedLinear)
+        except: pass
+        return False
 
 def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1, max_epoch_mixing_activations=10):
     if model_type not in ['vanilla', 'sparsified']:

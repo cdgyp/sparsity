@@ -1,9 +1,17 @@
+from typing import Union
 import torch
-from torch import nn
+from torch import Tensor, nn
+from torch.nn.modules.module import Module
 from ..base import ModuleReference
+from math import sqrt
+
+try:
+    import loralib as lora
+except ImportError:
+    print("Warning: Cannot import loralib")
 
 class MagicSynapse(nn.Module):
-    def __init__(self, rho: float=0.1, linear: nn.Linear=None, layer_norm: nn.LayerNorm=None) -> None:
+    def __init__(self, rho: float=0.1, linear: nn.Linear=None, layer_norm: nn.LayerNorm=None, losses=None) -> None:
         """
             rho: approximately the ratio between noise std and entry norms in weight matrices
         """
@@ -13,9 +21,19 @@ class MagicSynapse(nn.Module):
         self.ln: nn.LayerNorm = ModuleReference(layer_norm) if layer_norm is not None else None
         self._cache: dict[str, torch.Tensor] = {}
         self._cache_gaussian: dict[str, torch.Tensor] = {}
+        self.losses = losses
     def get_sigma(self, module: torch.nn.Linear):
-        weight = module.weight
-        return weight.detach().abs_().mean().mul(self.rho)
+        if hasattr(module, 'merge_weights'):
+            # dealing with LoRAed linear layers
+            assert isinstance(module, lora.Linear) or isinstance(module, lora.MergedLinear)
+            old_training = bool(module.training)
+            module.train(False)
+            weight = module.weight + (module.weight_attaching_to.main if hasattr(module, 'weight_attaching_to') else 0)
+            module.train(old_training)
+        else:
+            weight = module.weight
+        sigma = weight.norm().div_(sqrt(weight.numel())).mul_(self.rho)
+        return sigma
     def get_norms(self, input: torch.Tensor):
         """
             use pre-allocated memory when computing norms
@@ -60,6 +78,12 @@ class MagicSynapse(nn.Module):
             else:
                 MagicSynapse.plug_in(module, rho=rho, filter=filter, path=p)
         return model
+    
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.linear, name)
 
 try:
     from ..base import InputHook

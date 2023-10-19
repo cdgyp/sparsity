@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.nn.functional import dropout, softmax, linear, scaled_dot_product_attention
 from torch.nn.functional import _in_projection, has_torch_function, _mha_shape_check, _canonical_mask, _none_or_dtype
 import math
+from ..base import ModuleReference
 
 class LoRAMultiheadAttention(MultiheadAttention, lora.LoRALayer):
     def __init__(self, 
@@ -25,6 +26,7 @@ class LoRAMultiheadAttention(MultiheadAttention, lora.LoRALayer):
                 assert not lora_linear.merged
                 lora_linear.weight.zero_()
                 lora_linear.weight.requires_grad = False
+                lora_linear.weight_attaching_to = ModuleReference(weight)
                 return lora_linear
             self.lora_out_proj = make_lora(self.out_proj.weight)
             if self._qkv_same_embed_dim:
@@ -33,6 +35,7 @@ class LoRAMultiheadAttention(MultiheadAttention, lora.LoRALayer):
                 assert not self.lora_in_proj.merged
                 self.lora_in_proj.weight.zero_()
                 self.lora_in_proj.weight.requires_grad = False
+                self.lora_in_proj.weight_attaching_to = ModuleReference(self.in_proj_weight)
             else:
                 self.lora_q = make_lora(self.q_proj_weight)
                 self.lora_k = make_lora(self.k_proj_weight)
