@@ -19,6 +19,7 @@ from torch import Tensor, nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 from ...base import LossManager, Model, addprop
+from ...procedures.adversarial import FGSMExample
 # from ...scheduler.sine import SineAnnealingScheduler
 
 import inspect
@@ -76,6 +77,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
                     minibatch_output = model(minibatch_image)
                     minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
 
+                assert minibatch_loss.requires_grad
                 with torch.autograd.profiler.record_function("backward"):
                     if scaler is not None:
                         scaler.scale(minibatch_loss).backward()
@@ -134,18 +136,30 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
 
 
 
-def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix=""):
+def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="", adversarial=False):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = f"Test: {log_suffix}"
     if hasattr(model, 'losses'): model.losses.reset()
 
+    if adversarial:
+        def adv_test(pred, Y):
+            return pred
+        adv = FGSMExample(None, model, torch.nn.CrossEntropyLoss(), 8/255, adv_test, tqdm=False)
+
     num_processed_samples = 0
-    with torch.inference_mode():
+    turn_off_grad = torch.inference_mode if not adversarial else torch.no_grad
+    with turn_off_grad():
         for image, target in metric_logger.log_every(data_loader, print_freq, header):
             image = image.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
-            output = model(image)
+                
+            if adversarial:
+                with torch.enable_grad():
+                    _, adv_image, _, output, adv_output = list(adv.run(len(target), generator=True, data=[(image, target)]))[0]
+            else:
+                output = model(image)
+            
             loss = criterion(output, target)
 
             acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
@@ -155,6 +169,10 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
             metric_logger.update(loss=loss.item())
             metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
             metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
+            if adversarial:
+                acc1, acc5 = utils.accuracy(adv_output, target, topk=(1, 5))
+                metric_logger.meters["advs_acc1"].update(acc1.item(), n=batch_size)
+                metric_logger.meters["advs_acc5"].update(acc5.item(), n=batch_size)
             num_processed_samples += batch_size
             if hasattr(model, 'after_testing_step'):
                 model.after_testing_step()
@@ -179,12 +197,17 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     if hasattr(model, 'losses'):
         model.losses.observe(metric_logger.acc1.global_avg / 100, 'test_acc', 1)
         model.losses.observe(metric_logger.acc5.global_avg / 100, 'test_acc', 5)
+        if adversarial:
+            model.losses.observe(metric_logger.advs_acc1.global_avg / 100, 'test_advs_acc', 1)
+            model.losses.observe(metric_logger.advs_acc5.global_avg / 100, 'test_advs_acc', 5)
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.reset()
         model.after_testing()
         model.epoch += 1
 
     print(f"{header} Acc@1 {metric_logger.acc1.global_avg:.3f} Acc@5 {metric_logger.acc5.global_avg:.3f}")
+    if adversarial:
+        print(f"Adversarial {header} Acc@1 {metric_logger.advs_acc1.global_avg:.3f} Acc@5 {metric_logger.advs_acc5.global_avg:.3f}")
     return metric_logger.acc1.global_avg
 
 
@@ -480,7 +503,10 @@ def main(args):
 
     def train_epochs():
         print("Start training")
-        evaluate(model, criterion, data_loader_test, device=device)
+        if args.finetune and not args.resume:
+            evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing)
+        model.train()
+        assert any([p.requires_grad for p in iter(model.parameters())])
         with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
             start_time = time.time()
             for epoch in range(args.start_epoch, args.physical_epochs):
@@ -491,7 +517,7 @@ def main(args):
                     if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
                         break
                     lr_scheduler.step()
-                    evaluate(model, criterion, data_loader_test, device=device)
+                    evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing)
                     if model_ema:
                         evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
                     if args.output_dir:
@@ -669,6 +695,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--activation-mixing-epoch", type=int, default=10)
     parser.add_argument("--mixed-activation", action="store_true")
     parser.add_argument("--layernorm-uplifting-epoch", type=int, default=10)
+    parser.add_argument("--adversarial-testing", action="store_true")
     return parser
 
 

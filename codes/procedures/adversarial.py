@@ -7,28 +7,31 @@ from tqdm.auto import tqdm
 from math import ceil, sqrt
 
 class AdversarialExample:
-    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, n_iterations: int, test_fn=None):
+    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, n_iterations: int, test_fn=None, tqdm=True):
         self.dataloader = dataloader
         self.model = model
         self.loss_fn = loss_fn
         self.n_iterations = n_iterations
         self.test_fn = test_fn
+        self.tqdm = tqdm
     def step(self, adversarial_X: torch.nn.Parameter, X: torch.Tensor, Y: torch.Tensor):
         pass
     def generate_for_batch(self, X: torch.Tensor, Y: torch.Tensor):
         adversarial_X = torch.nn.Parameter(X.clone().detach(), requires_grad=True)
+        optimizer = torch.optim.SGD([adversarial_X], lr=0)
         for t in range(self.n_iterations):
             pred = self.model(adversarial_X)
             loss = self.loss_fn(pred, Y)
             (-loss).backward()
 
             self.step(adversarial_X, X, Y)
-            adversarial_X.grad = None
+            optimizer.zero_grad()
 
-        return adversarial_X.data
+        return adversarial_X.data, pred
 
-    def run(self, n_samples, generator=False):
+    def run(self, n_samples, generator=False, data=None):
         self.model.eval()
+        require_grads = [bool(p.requires_grad) for p in self.model.parameters()]
         self.model.requires_grad_(False)
         
         remained_samples = n_samples
@@ -39,7 +42,11 @@ class AdversarialExample:
         self.adversarial_test = []
         device = next(iter(self.model.parameters())).device
 
-        iterator = tqdm(self.dataloader, desc="Generating Adversarial Examples", total=min(ceil(n_samples / self.dataloader.batch_size), len(self.dataloader))) if not generator else self.dataloader
+
+        if data is not None:
+            iterator = data
+        else:
+            iterator = tqdm(self.dataloader, desc="Generating Adversarial Examples", total=min(ceil(n_samples / self.dataloader.batch_size), len(self.dataloader))) if not generator and self.tqdm else self.dataloader
 
         for (X, Y) in iterator:
             if remained_samples <= 0:
@@ -48,9 +55,16 @@ class AdversarialExample:
             Y = Y[:remained_samples].to(device)
             remained_samples -= len(X)
             
-            adversarial_X = self.generate_for_batch(X, Y)
-            bl_test = torch.tensor(self.test_fn(self.model(X), Y))
-            adv_test = torch.tensor(self.test_fn(self.model(adversarial_X), Y))
+            adversarial_X, pred = self.generate_for_batch(X, Y)
+            if hasattr(self.model, 'after_testing_step'):
+                self.model.after_testing_step()
+            
+            bl_test = self.test_fn(pred, Y)
+            with torch.inference_mode():
+                adv_test = self.test_fn(self.model(adversarial_X), Y)
+            if not isinstance(bl_test, torch.Tensor): bl_test = torch.tensor(bl_test)
+            if not isinstance(adv_test, torch.Tensor): adv_test = torch.tensor(adv_test)
+
             if generator:
                 yield X, adversarial_X, Y, bl_test, adv_test
             else:
@@ -60,6 +74,10 @@ class AdversarialExample:
             if self.test_fn is not None:
                 self.baseline_test.append(bl_test)
             self.adversarial_test.append(adv_test)
+
+        for rg, p in zip(require_grads, self.model.parameters()):
+            p.requires_grad = rg
+            
         if not generator:
             if self.test_fn:
                 return torch.cat(baseline), torch.cat(res), torch.cat(Ys), torch.cat(self.baseline_test), torch.cat(self.adversarial_test)
@@ -69,8 +87,8 @@ class AdversarialExample:
             return
     
 class FGSMExample(AdversarialExample):
-    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, epsilon: float, test_fn=None):
-        super().__init__(dataloader, model, loss_fn, 1, test_fn=test_fn)
+    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, epsilon: float, test_fn=None, tqdm=True):
+        super().__init__(dataloader, model, loss_fn, 1, test_fn=test_fn, tqdm=tqdm)
         self.epsilon = abs(epsilon)
 
     def step(self, adversarial_X: torch.nn.Parameter, X: torch.Tensor, Y: torch.Tensor):
