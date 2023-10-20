@@ -136,7 +136,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
 
 
 
-def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="", adversarial=False):
+def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="", adversarial=False, n_step=None):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = f"Test: {log_suffix}"
@@ -176,6 +176,8 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
             num_processed_samples += batch_size
             if hasattr(model, 'after_testing_step'):
                 model.after_testing_step()
+            if n_step is not None and num_processed_samples / batch_size > n_step:
+                break
     # gather the stats from all processes
 
     num_processed_samples = utils.reduce_across_processes(num_processed_samples)
@@ -195,11 +197,15 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     metric_logger.synchronize_between_processes()
 
     if hasattr(model, 'losses'):
-        model.losses.observe(metric_logger.acc1.global_avg / 100, 'test_acc', 1)
-        model.losses.observe(metric_logger.acc5.global_avg / 100, 'test_acc', 5)
+        if len(log_suffix) > 0:
+            suffix = '_' + log_suffix
+        else:
+            suffix=''
+        model.losses.observe(metric_logger.acc1.global_avg / 100, 'test_acc' + suffix, 1)
+        model.losses.observe(metric_logger.acc5.global_avg / 100, 'test_acc' + suffix, 5)
         if adversarial:
-            model.losses.observe(metric_logger.advs_acc1.global_avg / 100, 'test_advs_acc', 1)
-            model.losses.observe(metric_logger.advs_acc5.global_avg / 100, 'test_advs_acc', 5)
+            model.losses.observe(metric_logger.advs_acc1.global_avg / 100, 'test_advs_acc' + suffix, 1)
+            model.losses.observe(metric_logger.advs_acc5.global_avg / 100, 'test_advs_acc' + suffix, 5)
         model.losses.log_losses(model.iteration, testing=True)
         model.losses.reset()
         model.after_testing()
@@ -361,6 +367,11 @@ def main(args):
         persistent_workers=True if args.workers > 0 else False
     )
 
+    data_loader_test_trainig_samples = torch.utils.data.DataLoader(
+        dataset, batch_size=args.physical_batch_size, sampler=train_sampler, num_workers=args.workers, pin_memory=True, drop_last=True,
+        persistent_workers=True if args.workers > 0 else False
+    )
+
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu")
         args.start_epoch = checkpoint["epoch"] + 1 if args.resume else args.start_epoch
@@ -504,6 +515,8 @@ def main(args):
     def train_epochs():
         print("Start training")
         if args.finetune and not args.resume:
+            if args.test_training_samples > 0:
+                evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples)
             evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing)
         model.train()
         assert any([p.requires_grad for p in iter(model.parameters())])
@@ -517,6 +530,8 @@ def main(args):
                     if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
                         break
                     lr_scheduler.step()
+                    if args.test_training_samples > 0:
+                        evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples)
                     evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing)
                     if model_ema:
                         evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
@@ -696,6 +711,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--mixed-activation", action="store_true")
     parser.add_argument("--layernorm-uplifting-epoch", type=int, default=10)
     parser.add_argument("--adversarial-testing", action="store_true")
+    parser.add_argument("--test-training-samples", type=int, default=0, help="step number to test training samples in every evaluation")
     return parser
 
 
