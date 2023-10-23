@@ -6,15 +6,15 @@ from torch.utils.data import DataLoader
 from ...base import Model, Wrapper
 
 from ...modules.sparsify import Sparsify
-from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, EncoderBlock
+from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, EncoderBlock, ResidualConnection
 from ...modules.robustness import DoublyBiased
 
 from torch.distributed import get_rank
 
 
 class ImageNet1kSparsify(Sparsify):
-    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={'activation_mixing_iteration': None, 'layernorm_uplifting_iteration': None}, lora_r=None, model_type=Model, wrapper_type=Wrapper) -> None:
-        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, scheduling, lora_r, model_type, wrapper_type)
+    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={'activation_mixing_iteration': None, 'layernorm_uplifting_iteration': None}, lora_r=None, model_type=Model, wrapper_type=Wrapper, magic_residual=False) -> None:
+        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, scheduling, lora_r, model_type, wrapper_type, magic_residual)
         self.mlp_types = [MLPBlock]
     def extract_linear_layers(self, mlp: MLPBlock) -> 'dict[str, torch.nn.Linear]':
         linears = {
@@ -47,6 +47,9 @@ class ImageNet1kSparsify(Sparsify):
             return isinstance(module, lora.Linear) or isinstance(module, lora.MergedLinear)
         except: pass
         return False
+    def skip_connection_filter(self, path: str, module: torch.nn.Module):
+        return isinstance(module, ResidualConnection)
+        
 
 def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epoch_size=0, start_epoch=1, max_epoch_mixing_activations=10):
     if model_type not in ['vanilla', 'sparsified']:
@@ -71,7 +74,8 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         rho=args.magic_synapse_rho,
         log_per_step=args.log_per_step,
         scheduling={'activation_mixing_iteration': args.activation_mixing_epoch * len(dataloader), 'layernorm_uplifting_iteration': args.layernorm_uplifting_epoch * len(dataloader)},
-        lora_r=args.lora_r
+        lora_r=args.lora_r,
+        magic_residual=args.magic_residual
     )(
             'imagenet1k', 
             args.title + '/' + model_type,

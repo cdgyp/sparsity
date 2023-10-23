@@ -22,6 +22,7 @@ class Sparsify:
         lora_r=None,
         model_type=Model, 
         wrapper_type=Wrapper,
+        magic_residual=False,
     ) -> None:
         self.activations = []
         self.mlps = []
@@ -40,6 +41,7 @@ class Sparsify:
         self.log_per_step = log_per_step
         self.scheduling = scheduling
         self.lora_r = lora_r
+        self.magic_residual = magic_residual
 
         if self.restricted_affine is None:
             self.restricted_affine = self.db_mlp
@@ -80,6 +82,7 @@ class Sparsify:
     def wrap_MLP(self, path: str, name: str, model: torch.nn.Module, module: torch.nn.Module, clipping, shape):
         pass
 
+
     def replace_MLPs(self, model: torch.nn.Module, clipping=None, shape=None, path='model'):
         for name, module in model.named_children():
             p = '.'.join([path, name])
@@ -92,6 +95,8 @@ class Sparsify:
 
     def magic_synapse_filter(self, name: str, module: torch.nn.Module):
         return True
+    def skip_connection_filter(self, path: str, module: torch.nn.Module):
+        raise NotImplemented()
 
     def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False):
         obs: 'list[torch.nn.Module]' = [
@@ -200,7 +205,7 @@ class Sparsify:
         
         if self.magic_synapse:
             print("MagicSynapse: Plugging in")
-            main = MagicSynapse.plug_in(model=main, rho=self.rho, filter=self.magic_synapse_filter)
+            main = MagicSynapse.plug_in(model=main, rho=self.rho, filter=self.magic_synapse_filter, skip_connections=self.magic_residual, skip_connection_filer=self.skip_connection_filter)
             print("MagicSynapse: Finished")
         
         model = self._make_model(main, finetuning, has_obs=True, use_mixed_activation=mixed_activation).to(device)

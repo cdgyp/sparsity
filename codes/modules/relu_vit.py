@@ -99,6 +99,11 @@ class MLPBlock(MLP):
 
         # return z.unflatten(0, x_batching_shape).half()
 
+class ResidualConnection(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    def forward(self, x):
+        return x
 
 class EncoderBlock(nn.Module):
     """Transformer encoder block."""
@@ -128,6 +133,9 @@ class EncoderBlock(nn.Module):
         if self.rezero:
             self.alpha_1 = nn.Parameter(torch.tensor([0.0]))
             self.alpha_2 = nn.Parameter(torch.tensor([0.0]))
+        
+        self.res1 = ResidualConnection()
+        self.res2 = ResidualConnection()
 
     def forward(self, input: torch.Tensor):
         torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
@@ -138,18 +146,18 @@ class EncoderBlock(nn.Module):
         x, _ = self.self_attention(query=x, key=x, value=x, need_weights=False)
         x = self.dropout(x)
         if self.rezero:
-            x = input + self.alpha_1 * x
+            x = self.res1(input) + self.alpha_1 * x
             y = x
         else:
-            x = x + input
+            x = x + self.res1(input)
         
         y = self.ln_2(x)
 
         y = self.mlp(y)
         if self.rezero:
-            z = x + self.alpha_2 * y
+            z = self.res2(x) + self.alpha_2 * y
         else:
-            z = x + y
+            z = self.res2(x) + y
         
         return z
 

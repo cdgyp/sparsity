@@ -136,7 +136,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
 
 
 
-def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="", adversarial=False, n_step=None):
+def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="", adversarial=False, n_step=None, adversarial_eps=0.0):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = f"Test: {log_suffix}"
@@ -145,7 +145,7 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     if adversarial:
         def adv_test(pred, Y):
             return pred
-        adv = FGSMExample(None, model, torch.nn.CrossEntropyLoss(), 8/255, adv_test, tqdm=False)
+        adv = FGSMExample(None, model, torch.nn.CrossEntropyLoss(), adversarial_eps, adv_test, tqdm=False, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
     num_processed_samples = 0
     turn_off_grad = torch.inference_mode if not adversarial else torch.no_grad
@@ -516,8 +516,8 @@ def main(args):
         print("Start training")
         if args.finetune and not args.resume:
             if args.test_training_samples > 0:
-                evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples)
-            evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing)
+                evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples, adversarial_eps=args.adversarial_eps)
+            evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing, adversarial_eps=args.adversarial_eps)
         model.train()
         assert any([p.requires_grad for p in iter(model.parameters())])
         with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
@@ -531,8 +531,8 @@ def main(args):
                         break
                     lr_scheduler.step()
                     if args.test_training_samples > 0:
-                        evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples)
-                    evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing)
+                        evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples, adversarial_eps=args.adversarial_eps)
+                    evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing, adversarial_eps=args.adversarial_eps)
                     if model_ema:
                         evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
                     if args.output_dir:
@@ -711,7 +711,13 @@ def get_args_parser(add_help=True):
     parser.add_argument("--mixed-activation", action="store_true")
     parser.add_argument("--layernorm-uplifting-epoch", type=int, default=10)
     parser.add_argument("--adversarial-testing", action="store_true")
+    def parse_epsilon(eps: str):
+        if isinstance(eps, str):
+            return eval(eps)
+        return eps
+    parser.add_argument("--adversarial-eps", action="store_const", const=parse_epsilon, dest="adversarial_esp", default="1/255")
     parser.add_argument("--test-training-samples", type=int, default=0, help="step number to test training samples in every evaluation")
+    parser.add_argument("--magic-residual", action="store_true")
     return parser
 
 

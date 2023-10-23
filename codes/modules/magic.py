@@ -11,7 +11,7 @@ except ImportError:
     print("Warning: Cannot import loralib")
 
 class MagicSynapse(nn.Module):
-    def __init__(self, rho: float=0.1, linear: nn.Linear=None, layer_norm: nn.LayerNorm=None, losses=None) -> None:
+    def __init__(self, rho: float=0.1, linear: nn.Linear=None, layer_norm: nn.LayerNorm=None, losses=None, skip_connection=False) -> None:
         """
             rho: approximately the ratio between noise std and entry norms in weight matrices
         """
@@ -22,17 +22,21 @@ class MagicSynapse(nn.Module):
         self._cache: dict[str, torch.Tensor] = {}
         self._cache_gaussian: dict[str, torch.Tensor] = {}
         self.losses = losses
-    def get_sigma(self, module: torch.nn.Linear):
-        if hasattr(module, 'merge_weights'):
-            # dealing with LoRAed linear layers
-            assert isinstance(module, lora.Linear) or isinstance(module, lora.MergedLinear)
-            old_training = bool(module.training)
-            module.train(False)
-            weight = module.weight + (module.weight_attaching_to.main if hasattr(module, 'weight_attaching_to') else 0)
-            module.train(old_training)
+        self.skip_connection = skip_connection
+    def get_sigma(self, module: torch.nn.Linear, x: torch.Tensor=None):
+        if self.skip_connection:
+            sigma = self.rho / sqrt(x.shape[-1]) / 10
         else:
-            weight = module.weight
-        sigma = weight.norm().div_(sqrt(weight.numel())).mul_(self.rho)
+            if hasattr(module, 'merge_weights'):
+                # dealing with LoRAed linear layers
+                assert isinstance(module, lora.Linear) or isinstance(module, lora.MergedLinear)
+                old_training = bool(module.training)
+                module.train(False)
+                weight = module.weight + (module.weight_attaching_to.main if hasattr(module, 'weight_attaching_to') else 0)
+                module.train(old_training)
+            else:
+                weight = module.weight
+            sigma = weight.norm().div_(sqrt(weight.numel())).mul_(self.rho)
         return sigma
     def get_norms(self, input: torch.Tensor):
         """
@@ -52,7 +56,7 @@ class MagicSynapse(nn.Module):
     
     def get_noises(self, input: torch.Tensor, output: torch.Tensor, module: torch.nn.Linear):
         with torch.no_grad():
-            sigma = self.get_sigma(module)
+            sigma = self.get_sigma(module, x=input)
             norms = self.get_norms(input=input)
             gaussians = self.get_standard_gaussian(output=output)
             return gaussians.mul_(sigma).mul_(norms)
@@ -69,14 +73,17 @@ class MagicSynapse(nn.Module):
             output = module(input)
         return self.perturb(module, input, output)
     
-    def plug_in(model: nn.Module, rho: float=0.1, filter=None, path='model'):
+    def plug_in(model: nn.Module, rho: float=0.1, filter=None, path='model', skip_connections=False, skip_connection_filer=None):
         for name, module in model.named_children():
             p = '.'.join([path, name])
             if isinstance(module, nn.Linear) and (filter is None or filter(p, module)):
                 setattr(model, name, MagicSynapse(rho=rho, linear=module))
                 print(f'\t {p}')
+            elif skip_connections and ('res' in name.lower() or 'res' in str(module.__class__.__name__).lower() or 'skip' in name.lower() or 'skip' in str(module.__class__.__name__).lower()) and (skip_connection_filer is None or skip_connection_filer(p, module)):
+                setattr(model, name, MagicSynapse(rho=rho, linear=module, skip_connection=True))
+                print(f'\t {p}')
             else:
-                MagicSynapse.plug_in(module, rho=rho, filter=filter, path=p)
+                MagicSynapse.plug_in(module, rho=rho, filter=filter, path=p, skip_connections=skip_connections, skip_connection_filer=skip_connection_filer)
         return model
     
     def __getattr__(self, name: str):
