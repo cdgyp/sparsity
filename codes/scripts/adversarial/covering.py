@@ -92,6 +92,9 @@ def main():
             full_model.losses.observe(bl_test.mean(), "acc", "baseline")
             full_model.losses.observe(adv_test.mean(), "acc", "adversarial")
             full_model.losses.observe(adv2_acc.mean(), "acc", "adversarial2")
+            
+            full_model.losses.observe(args.epsilon, "eps")
+            
             adversarial_plugin.activated = False
             for h in adversarial_plugin.hooks:
                 h.activated = False

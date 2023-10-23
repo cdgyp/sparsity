@@ -38,7 +38,7 @@ class AdversarialExample:
     @overload
     def step(self, adversarial_X: torch.nn.Parameter, X: torch.Tensor, Y: torch.Tensor):
         pass
-    
+
     def generate_for_batch(self, X: torch.Tensor, Y: torch.Tensor):
         adversarial_X = torch.nn.Parameter(self.denorm(X.clone().detach()), requires_grad=True)
         optimizer = torch.optim.SGD([adversarial_X], lr=0)
@@ -137,15 +137,18 @@ class AdversarialObservation(Plugin):
         def set_filter(self, pairing_dimension=None):
             self.pairing_dimension = pairing_dimension
 
-        def hard_filter(self, eigen_val: torch.Tensor):
-            sorted_eigen_val = eigen_val.sort(dim=-1, descending=True)[0]
+        def hard_filter(self, eigen_val: torch.Tensor, rank=0):
+            sorted_eigen_val = eigen_val
             eigen_sum = torch.zeros(eigen_val.shape[: -1], device=eigen_val.device)
             eigen_threshold = torch.zeros(eigen_val.shape[: -1], device=eigen_val.device)
-            for i in range(sorted_eigen_val.shape[-1]):
-                eigen_threshold = eigen_threshold.maximum(sorted_eigen_val[..., i] * (eigen_sum > self.filter_threshold * eigen_val.sum(dim=-1)))
+            esum = eigen_val.sum(dim=-1)
+            for i in reversed(range(sorted_eigen_val.shape[-1] - rank, sorted_eigen_val.shape[-1])):
+                if i > 0:
+                    assert (~(sorted_eigen_val[..., i] >= sorted_eigen_val[..., i-1])).sum() == 0
+                eigen_threshold = eigen_threshold.maximum(sorted_eigen_val[..., i] * (eigen_sum > abs(self.filter_threshold) * esum))
                 eigen_sum += sorted_eigen_val[..., i]
             # print(((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1).mean(), eigen_val.sum(dim=-1).mean(),.float().mean())
-            assert all((((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1) >= self.filter_threshold * eigen_val.sum(dim=-1)))
+            assert all((((eigen_val >= eigen_threshold.unsqueeze(dim=-1)) * eigen_val).sum(dim=-1) >= abs(self.filter_threshold) * eigen_val.sum(dim=-1)))
             return (eigen_val >= eigen_threshold.unsqueeze(dim=-1)).float()
         def soft_filter(self, eigen_val: torch.Tensor):
             return eigen_val.sqrt()
@@ -160,14 +163,19 @@ class AdversarialObservation(Plugin):
 
             if self.pairing_dimension is not None:
                 if self.pairing_dimension == 'outer':
-                    X: torch.Tensor = self.inputs.unflatten(0, [2, -1])[0]
+                    Xs: torch.Tensor = self.inputs.unflatten(0, [2, -1])
+                    X: torch.Tensor = Xs[0]
+                    DeltaX = Xs[1] - Xs[0]
                     Zs: torch.Tensor = self.outputs.unflatten(0, [2, -1]) 
                     DeltaZ = Zs[1] - Zs[0]  # since substracted, biases are canceled
                 else:
                     raise NotImplemented()
                 assert not X.requires_grad
-                XXT = torch.matmul(X, X.transpose(-1, -2))
-                eigen_val, eigen_vec = torch.linalg.eig(XXT)
+                if self.filter_threshold >= 0:
+                    XXT = torch.matmul(X, X.transpose(-1, -2))
+                else:
+                    XXT = torch.matmul(X.transpose(-1, -2), X)
+                eigen_val, eigen_vec = torch.linalg.eigh(XXT)
                 eigen_val: torch.Tensor
                 eigen_vec: torch.Tensor
                 eigen_val = eigen_val.real.clamp(min=0)
@@ -175,13 +183,17 @@ class AdversarialObservation(Plugin):
                 if len(eigen_val.shape) == 1:
                     return
                 if self.filter_threshold is not None:
-                    filtered_eigen_val = self.hard_filter(eigen_val)
+                    filtered_eigen_val = self.hard_filter(eigen_val, rank=min(X.shape[-1], X.shape[-2]))
                 else:
                     filtered_eigen_val = self.soft_filter(eigen_val)
                 
                 diagonal_eigen_vec = torch.eye(eigen_vec.shape[-1], device=eigen_vec.device).unsqueeze(dim=0) * filtered_eigen_val.unsqueeze(dim=-1)
                 filter_XXT = torch.matmul(torch.matmul(eigen_vec, diagonal_eigen_vec), eigen_vec.transpose(-1, -2))
-                NewDeltaZ = torch.matmul(filter_XXT, DeltaZ)
+                if self.filter_threshold >= 0:
+                    NewDeltaZ = torch.matmul(filter_XXT, DeltaZ)
+                else:
+                    NewDeltaZ = torch.matmul(torch.matmul(DeltaX, filter_XXT), module.weight.transpose(-1, -2))
+
                 self.losses.observe((NewDeltaZ.norm(dim=[-1, -2]) / DeltaZ.norm(dim=[-1, -2])).mean(), 'norm_change_by_filtering')
 
                 if self.filter_threshold is not None:
@@ -244,7 +256,6 @@ class AdversarialObservation(Plugin):
                 else:
                     raise NotImplemented()
                 XXT = torch.matmul(X, X.transpose(-1, -2))
-                XXTXXT = torch.matmul(XXT, XXT.transpose(-1, -2))
                 if i < len(self.hooks) - 1:
                     # print(h.name, ":", torch.trace(XXTXXT.mean(dim=0)) / torch.trace(XXT.mean(dim=0))**2)
                     pass

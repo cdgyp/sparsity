@@ -27,5 +27,6 @@ do
         --magic-synapse \
         --magic-synapse-rho 0.05        \
         --adversarial-testing \
+        --val-resize-size 224 \
         "$@"
 done
