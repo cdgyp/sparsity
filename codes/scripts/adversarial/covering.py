@@ -36,7 +36,7 @@ class BaselineAdversarialPairDataset(Dataset):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, required=True)
-    parser.add_argument('--epsilon', type=float, required=True)
+    parser.add_argument('--epsilon', required=True)
     parser.add_argument('--title', type=str, required=True)
     parser.add_argument('--batch-size', type=int, required=True)
     parser.add_argument('--n-samples', type=int, required=True)
@@ -44,6 +44,11 @@ def main():
     parser.add_argument('--log-per-step', type=int, default=10)
     parser.add_argument('--filter-threshold', type=float, default=None, help="Defaults to None, meaning using soft spectral filtering")
     args = parser.parse_args()
+
+    if isinstance(args.epsilon, str):
+        args.epsilon = eval(args.epsilon)
+
+
 
     weight = ViT_B_16_Weights.DEFAULT
     
@@ -55,7 +60,7 @@ def main():
     dataloader = DataLoader(dataset, args.batch_size, num_workers=8, shuffle=True, drop_last=True, pin_memory=True)
 
     
-    adv = FGSMExample(dataloader, model, torch.nn.CrossEntropyLoss(), epsilon=args.epsilon, test_fn=accuracy)
+    adv = FGSMExample(dataloader, model, torch.nn.CrossEntropyLoss(), epsilon=args.epsilon, test_fn=accuracy, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
     writer, logdir = new_experiment('covering/' + args.title, args, dir_to_runs='runs')
     start_tensorboard_server(writer.logdir)

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, overload
 import torch
 from torch  import nn
 from torch.utils.data import DataLoader
@@ -7,17 +7,40 @@ from tqdm.auto import tqdm
 from math import ceil, sqrt
 
 class AdversarialExample:
-    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, n_iterations: int, test_fn=None, tqdm=True):
+    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, n_iterations: int, test_fn=None, tqdm=True, mean=None, std=None):
         self.dataloader = dataloader
         self.model = model
         self.loss_fn = loss_fn
         self.n_iterations = n_iterations
         self.test_fn = test_fn
         self.tqdm = tqdm
+        self.mean = torch.Tensor(mean) if mean is not None else None
+        self.std = torch.Tensor(std) if std is not None else None
+    def denorm(self, x: torch.Tensor):
+        if self.std is not None:
+            self.std = self.std.to(x.device)
+            x = x * self.std.reshape(1, -1, 1, 1)
+        if self.mean is not None:
+            self.mean = self.mean.to(x.device)
+            x = x + self.mean.reshape(1, -1, 1, 1)
+
+        assert ((0 <= x) & (x <= 1)).sum() >= x.numel()
+
+        return x
+    
+    def normalize(self, x: torch.Tensor):
+        if self.mean is not None:
+            x = x - self.mean.reshape(1, -1, 1, 1)
+        if self.std is not None:
+            x = x / self.std.reshape(1, -1, 1, 1)
+        return x
+    
+    @overload
     def step(self, adversarial_X: torch.nn.Parameter, X: torch.Tensor, Y: torch.Tensor):
         pass
+    
     def generate_for_batch(self, X: torch.Tensor, Y: torch.Tensor):
-        adversarial_X = torch.nn.Parameter(X.clone().detach(), requires_grad=True)
+        adversarial_X = torch.nn.Parameter(self.denorm(X.clone().detach()), requires_grad=True)
         optimizer = torch.optim.SGD([adversarial_X], lr=0)
         for t in range(self.n_iterations):
             pred = self.model(adversarial_X)
@@ -27,7 +50,7 @@ class AdversarialExample:
             self.step(adversarial_X, X, Y)
             optimizer.zero_grad()
 
-        return adversarial_X.data, pred
+        return self.normalize(adversarial_X.data), pred
 
     def run(self, n_samples, generator=False, data=None):
         self.model.eval()
@@ -87,13 +110,13 @@ class AdversarialExample:
             return
     
 class FGSMExample(AdversarialExample):
-    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, epsilon: float, test_fn=None, tqdm=True):
-        super().__init__(dataloader, model, loss_fn, 1, test_fn=test_fn, tqdm=tqdm)
+    def __init__(self, dataloader: DataLoader, model: torch.nn.Module, loss_fn: torch.nn.Module, epsilon: float, test_fn=None, tqdm=True, mean=None, std=None):
+        super().__init__(dataloader, model, loss_fn, 1, test_fn=test_fn, tqdm=tqdm, mean=mean, std=std)
         self.epsilon = abs(epsilon)
 
     def step(self, adversarial_X: torch.nn.Parameter, X: torch.Tensor, Y: torch.Tensor):
         with torch.no_grad():
-            adversarial_X.add_(self.epsilon * adversarial_X.grad.sign()).clamp_(0, 1)
+            adversarial_X.add_(-self.epsilon * adversarial_X.grad.sign()).clamp_(0, 1)
 
 
 class AdversarialObservation(Plugin):
