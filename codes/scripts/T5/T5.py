@@ -90,7 +90,7 @@ from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
 from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
-from .subclasses import CustomSeq2SeqTrainer, CustomSeq2SeqTrainingArugment
+from .subclasses import CustomSeq2SeqTrainer, CustomSeq2SeqTrainingArgument
 from .data import get_eval_dataset
 
 
@@ -180,7 +180,7 @@ class TrainingArguments:
 
 @dataclass
 class FinetuningArguments:
-    mixed_activation: bool = field(default=False, metadata={"help": "Wheter to mix activation functions in order to gradually adapt the replaced activation functions"})
+    mixed_activation: bool = field(default=False, metadata={"help": "Whether to mix activation functions in order to gradually adapt the replaced activation functions"})
     activation_mixing_steps: int = field(default=3000)
     layernorm_uplifting_steps: int = field(default=3000)
     finetune: str = field(default=None)
@@ -195,6 +195,8 @@ class FinetuningArguments:
 class EtcArguments:
     scan_eval: bool = field(default=None, metadata={"help": "Evaluate all checkpoints. If this option is turned on, then `resume` indicates the directory holding all checkpoints instead of a single one"})
     dir_to_checkpoints: str = field(default=None)
+    
+    gradient_density_only: bool = field(default=False, metadata={"help": "If turned on, the whole program is run only to measure the distribution of gradients back propagated to activations. Training, evaluation and most plugins will be turned off. Use in companion with option `--resume`."})
 
 
 @dataclass
@@ -680,7 +682,7 @@ class T5Sparsify(Sparsify):
 
         return model
     
-    def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False):
+    def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False, force_obs=None):
         from ...modules.hooks import ActivationDistributionPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin, VGradientObservationPlugin
         from ...modules.robustness import RestrictAffinePlugin, ZerothBiasPlugin
         from ...modules.activations import LinearActivationMixing
@@ -703,6 +705,14 @@ class T5Sparsify(Sparsify):
                 if ob is not None:
                     assert len(list(ob.parameters())) == 0
             obs = []
+
+        if force_obs is not None:
+            if isinstance(force_obs, list):
+                obs = force_obs
+            elif callable(force_obs):
+                obs = force_obs()
+            else:
+                raise NotImplemented()
         
         model = self.model_type(
             self.wrapper_type(model),
@@ -711,7 +721,7 @@ class T5Sparsify(Sparsify):
 
         return model
 
-def get_model(config, tokenizer, model_args: ModelArguments, training_args: TrainingArguments, finetuning_args: FinetuningArguments, inputs_length, targets_length):
+def get_model(config, tokenizer, model_args: ModelArguments, training_args: TrainingArguments, finetuning_args: FinetuningArguments, etc_args: EtcArguments, inputs_length, targets_length):
     
     if model_args.model_name_or_path:
         T5 = T5ForConditionalGeneration.from_pretrained(
@@ -728,6 +738,11 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
     from ...modules.hooks import ActivationHook
     ActivationHook.max_batch_size = training_args.max_obs_batch_size
 
+    from ...modules.hooks import GradientDensityPlugin
+    from ...modules.robustness import RestrictAffinePlugin
+
+    if etc_args.gradient_density_only:
+        os.makedirs('runs/T5/' + training_args.title + '/' + ('sparsified' if model_args.jsrelu else 'vanilla'), exist_ok=True)
 
     model, writer, output_dir = T5Sparsify(
         db_mlp=model_args.db_mlp,
@@ -740,12 +755,22 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         log_per_step=training_args.logging_steps,
         scheduling={"activation_mixing_iteration": finetuning_args.activation_mixing_steps, "layernorm_uplifting_iteration": finetuning_args.layernorm_uplifting_steps},
         lora_r=finetuning_args.lora_r,
-        do_train=training_args.do_train
+        do_train=training_args.do_train,
+        manual_plugins=(
+            [
+                RestrictAffinePlugin(
+                    log_per_step=training_args.logging_steps, 
+                    finetuning=False, 
+                    uplift_iterations=10000
+                ) if model_args.restricted_affine else None,
+                GradientDensityPlugin([T5DenseActDense], use_iteration=True, log_range=[-40, 0]),
+            ]   if etc_args.gradient_density_only else None
+        )
     )(
         'T5', 
         training_args.title,
         T5,
-        resume=training_args.resume,
+        resume=training_args.resume if not etc_args.gradient_density_only else 'runs/T5/' + training_args.title + '/' + ("sparsified" if model_args.jsrelu else "vanilla"),
         finetuning=finetuning_args.finetune,
         steps=0,
         start_epoch=0,
@@ -763,6 +788,12 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
             output.requires_grad_(True)
 
         model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    
+    if etc_args.gradient_density_only:
+        model.requires_grad_(False)
+        for m in model.modules():
+            if isinstance(m, nn.Embedding):
+                m.requires_grad_(True)
     
     return model, writer
     
@@ -961,10 +992,16 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_arg, finetuning_args, etc_arguments = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, finetuning_args, etc_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args, finetuning_args, etc_arguments = parser.parse_args_into_dataclasses()
-    model_args: ModelArguments; data_args: DataTrainingArguments; trainer_argument: TrainingArguments; finetuning_args: FinetuningArguments; etc_arguments: EtcArguments
+        model_args, data_args, training_args, finetuning_args, etc_args = parser.parse_args_into_dataclasses()
+    model_args: ModelArguments; data_args: DataTrainingArguments; training_args: TrainingArguments; finetuning_args: FinetuningArguments; etc_args: EtcArguments
+
+    if etc_args.gradient_density_only:
+        training_args.do_eval = False
+        training_args.learning_rate = 0
+        training_args.weight_decay = 0
+
 
     if model_args.use_auth_token is not None:
         warnings.warn("The `use_auth_token` argument is deprecated and will be removed in v4.34.", FutureWarning)
@@ -978,7 +1015,8 @@ def main():
 
     _arg = Seq2SeqTrainingArguments(training_args.output_dir)
 
-    enable_full_determinism(seed=training_args.seed + _arg.local_rank)
+    if not etc_args.gradient_density_only:
+        enable_full_determinism(seed=training_args.seed + _arg.local_rank)
 
     # Setup logging
     logging.basicConfig(
@@ -1172,7 +1210,7 @@ def main():
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
-    model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, finetuning_args=finetuning_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
+    model, summary_writer = get_model(config=config, tokenizer=tokenizer, model_args=model_args, training_args=training_args, finetuning_args=finetuning_args, etc_args=etc_args, inputs_length=data_args.max_seq_length, targets_length=targets_length)
     loss_manager = model.losses
 
     # Data collator
@@ -1229,7 +1267,7 @@ def main():
             "Use --overwrite_output_dir to overcome."
         )
 
-    trainer_argument = CustomSeq2SeqTrainingArugment(
+    trainer_argument = CustomSeq2SeqTrainingArgument(
         os.path.join(training_args.output_dir, 'save'),
         logging_dir=training_args.output_dir,
         overwrite_output_dir=True,
@@ -1255,7 +1293,7 @@ def main():
         # warmup_ratio=0,
         remove_unused_columns=False,
         # reproducibility
-        full_determinism=True,
+        full_determinism=True if not etc_args.gradient_density_only else False,
         seed=training_args.seed + dist.get_rank(),
         # fp16=True, # open automatic mixed precision
         dataloader_num_workers=16,
@@ -1283,7 +1321,7 @@ def main():
     trainer.add_callback(LoggingCallback(resume=(training_args.resume is not None)))
     logging.getLogger("tensorboard").setLevel(logging.WARNING)
 
-    if not etc_arguments.scan_eval:
+    if not etc_args.scan_eval:
         trainer.train(
             resume_from_checkpoint=training_args.resume
         )
@@ -1292,8 +1330,8 @@ def main():
             raise ValueError("Evaluation and no training are assumed under scanning evaluation")
         with torch.no_grad():
             extract_step = lambda x: int(x.split('-')[-1])
-            for checkpoint in tqdm(sorted(os.listdir(etc_arguments.dir_to_checkpoints), key=extract_step)):
-                checkpoint_full_path = os.path.join(etc_arguments.dir_to_checkpoints, checkpoint, 'pytorch_model.bin')
+            for checkpoint in tqdm(sorted(os.listdir(etc_args.dir_to_checkpoints), key=extract_step)):
+                checkpoint_full_path = os.path.join(etc_args.dir_to_checkpoints, checkpoint, 'pytorch_model.bin')
                 model.load_state_dict(torch.load(checkpoint_full_path, 'cpu'), strict=True)
                 # model.to(int(os.environ['RANK']) if 'RANK' in os.environ else 0)
                 model.iteration = extract_step(checkpoint)

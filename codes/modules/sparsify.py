@@ -122,8 +122,10 @@ class Sparsify:
         if force_obs is not None:
             if isinstance(force_obs, list):
                 obs = force_obs
-            else:
+            elif callable(force_obs):
                 obs = force_obs()
+            else:
+                raise NotImplemented()
         
         model = self.model_type(
             self.wrapper_type(model),

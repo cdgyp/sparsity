@@ -10,7 +10,7 @@ echo $batch_size_per_proc samples per process
 IFS=','
 for model in $MODELS;
 do
-        for checkpoint in model_0.pth model_25.pth model_50.pth model_100.pth model_150.pth model_200.pth model_250.pth model_280.pth model_290.pth checkpoint.pth; do
+        for checkpoint in model_101.pth model_0.pth model_25.pth model_50.pth model_100.pth model_150.pth model_200.pth model_250.pth model_280.pth model_290.pth checkpoint.pth; do
         torchrun --nproc_per_node=$n_visible_devices module_wrapper.py codes.scripts.imagenet1k.imagenet1k   \
                 --model $model --start-epoch 0 --epochs 300 --batch-size $batch_size_per_proc --physical-batch-size 64 --opt adamw --lr 0.0 --wd 0.0 \
                 --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \

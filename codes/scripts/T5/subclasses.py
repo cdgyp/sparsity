@@ -155,7 +155,7 @@ else:
 
 
 @dataclass
-class CustomSeq2SeqTrainingArugment(Seq2SeqTrainingArguments):
+class CustomSeq2SeqTrainingArgument(Seq2SeqTrainingArguments):
     max_obs_batch_size: int = field(
         default=8,
         metadata={"help": "Maximum batch size during logging."}

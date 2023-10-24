@@ -867,11 +867,14 @@ class VGradientObservationPlugin(HookingPlugin):
         for h in self.hooks:
             h.clean()
 class GradientDensityPlugin(HookingPlugin):
-    def __init__(self, mlp_types):
+    def __init__(self, mlp_types, use_iteration=False, log_range=[-10, 5]):
         super().__init__()
         self.hooks: 'list[ActivationGradientHook]' = None
         self.mlp_types = mlp_types
         self.count = 0
+        self.use_iteration = use_iteration
+        self.log_range = log_range
+        self.min_iteration = None
     def is_hook_active(self):
         return True
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
@@ -889,7 +892,7 @@ class GradientDensityPlugin(HookingPlugin):
             g = h.gradients
             g_input = torch.cat(h.gradients_wrt_input)
             assert len(g) == 1
-            abs_g = torch.cat(g).abs()
+            abs_g = torch.cat(g).abs_()
             # for _ in range(10):
                 # abs_g = self.remove_largest(abs_g)
             # for k, v in [(k, getattr(self, k)) for k in dir(self) if callable(getattr(self, k))]:
@@ -903,14 +906,17 @@ class GradientDensityPlugin(HookingPlugin):
                     # else:
                         # data = named_data
                         # self.losses.observe(data.mean(), 'gradient_density_' + name, i)
-            self.losses.histogram(abs_g.flatten().log10(), 'g', i, self.epoch-1, pth_split=self.count, do_not_display=True, bins=10000, hist_c_bound=[-10, 5])
-            self.losses.histogram(abs_g.flatten()[g_input.flatten() != 0].log10(), 'g_activated', i, self.epoch-1, pth_split=self.count, do_not_display=True, bins=10000, hist_c_bound=[-10, 5])
+            if self.min_iteration is None:
+                self.min_iteration = self.iteration
+            checkpoint_id = self.min_iteration - 1 if self.use_iteration else self.epoch - 1
+            self.losses.histogram(abs_g.flatten().log10(), 'g', i, checkpoint_id, pth_split=self.count, do_not_display=True, bins=10000, hist_c_bound=self.log_range)
+            self.losses.histogram(abs_g.flatten()[g_input.flatten() != 0].log10(), 'g_activated', i, checkpoint_id, pth_split=self.count, do_not_display=True, bins=10000, hist_c_bound=self.log_range)
             # self.losses.histogram(g_input.flatten().sign()[g_input.flatten() != 0], 'g_sign', i, self.epoch-1, hdf5_dataset_name=str(self.epoch-1))
             # self.losses.histogram(abs_g.flatten()[g_input.flatten() > 0].clamp(min=1e-10), 'g_activated_negative', i, self.epoch-1, hdf5_dataset_name=str(self.epoch-1))
             # self.losses.histogram(abs_g.flatten()[g_input.flatten() < 0].clamp(min=1e-10), 'g_activated_positive', i, self.epoch-1, hdf5_dataset_name=str(self.epoch-1))
 
-            self.losses.histogram(abs_g.flatten().clamp(min=1e-10).log10(), 'g', i)
-            self.losses.histogram(abs_g.flatten()[g_input.flatten() != 0].clamp(min=1e-10).log10(), 'g_activated', i)
+            self.losses.histogram(abs_g.flatten().log10().clamp(min=self.log_range[0]), 'g', i)
+            self.losses.histogram(abs_g.flatten()[g_input.flatten() != 0].log10().clamp(min=self.log_range[0]), 'g_activated', i)
             # self.losses.histogram(g_input.flatten().sign()[g_input.flatten() != 0], 'g_sign', i)
             # self.losses.histogram(abs_g.flatten()[g_input.flatten() > 0].clamp(min=1e-10).log10(), 'g_activated_negative', i)
             # self.losses.histogram(abs_g.flatten()[g_input.flatten() < 0].clamp(min=1e-10).log10(), 'g_activated_positive', i)
