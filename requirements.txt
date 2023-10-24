@@ -18,3 +18,4 @@ torchvision==0.15.2
 transformers 
 triton==2.0.0
 unicodedata2 
+h5py

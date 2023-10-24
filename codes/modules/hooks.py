@@ -104,6 +104,7 @@ class MlpGradientHook(BackwardHook):
         self.gradients: torch.Tensor = None
         self.active = False
         self.max_batch_size = 1024
+        self.gradients_wrt_input: torch.Tensor = None
 
     def __call__(self, module: nn.Module, grad_input, grad_output):
         if not self.active:
@@ -114,7 +115,14 @@ class MlpGradientHook(BackwardHook):
         if self.gradients is None:
             self.gradients = []
         self.gradients.append(grad)
+
+        grad_input = grad_input[0].to_dense().float() if isinstance(grad_input, tuple) else grad_input.to_dense().float()
+        assert isinstance(grad_input, torch.Tensor), grad_input
+        if self.gradients_wrt_input is None:
+            self.gradients_wrt_input = []
+        self.gradients_wrt_input.append(grad_input)
     def clean(self):
+        self.gradients_wrt_input = None
         self.gradients = None
     def hook_on_all(module: nn.Module, mlp_types, msg=None):
         return ActivationHook.hook_on_all(module, mlp_types, mlp_types, type=MlpGradientHook, msg=msg)
@@ -858,3 +866,85 @@ class VGradientObservationPlugin(HookingPlugin):
     def clean(self):
         for h in self.hooks:
             h.clean()
+class GradientDensityPlugin(HookingPlugin):
+    def __init__(self, mlp_types):
+        super().__init__()
+        self.hooks: 'list[ActivationGradientHook]' = None
+        self.mlp_types = mlp_types
+        self.count = 0
+    def is_hook_active(self):
+        return True
+    def register(self, main: BaseModule, plugins: 'list[Plugin]'):
+        self.hooks = ActivationGradientHook.hook_on_all(main, self.mlp_types)
+    def remove_largest(self, abs_g: torch.Tensor):
+        max_abs_g = abs_g.max(dim=-1)
+        old_shape = list(abs_g.shape)
+        abs_g = abs_g.flatten(end_dim=-2)
+        brd = torch.arange(len(abs_g), device=abs_g.device)
+        abs_g[brd, max_abs_g[1].flatten()] = abs_g[..., -1]
+        return abs_g.reshape(old_shape)[..., :-1]
+    def do_logs(self):
+        prefix = '_log_'
+        for i, h in enumerate(self.hooks):
+            g = h.gradients
+            g_input = torch.cat(h.gradients_wrt_input)
+            assert len(g) == 1
+            abs_g = torch.cat(g).abs()
+            # for _ in range(10):
+                # abs_g = self.remove_largest(abs_g)
+            # for k, v in [(k, getattr(self, k)) for k in dir(self) if callable(getattr(self, k))]:
+                # k: str
+                # if k.startswith(prefix):
+                    # name = k[k.find(prefix) + len(prefix):]
+                    # named_data = v(abs_g)
+                    # if isinstance(named_data, dict):
+                        # for n, data in named_data.items():
+                            # self.losses.observe(data.mean(), 'gradient_density_' + name, n, i)
+                    # else:
+                        # data = named_data
+                        # self.losses.observe(data.mean(), 'gradient_density_' + name, i)
+            self.losses.histogram(abs_g.flatten().log10(), 'g', i, self.epoch-1, pth_split=self.count, do_not_display=True, bins=10000, hist_c_bound=[-10, 5])
+            self.losses.histogram(abs_g.flatten()[g_input.flatten() != 0].log10(), 'g_activated', i, self.epoch-1, pth_split=self.count, do_not_display=True, bins=10000, hist_c_bound=[-10, 5])
+            # self.losses.histogram(g_input.flatten().sign()[g_input.flatten() != 0], 'g_sign', i, self.epoch-1, hdf5_dataset_name=str(self.epoch-1))
+            # self.losses.histogram(abs_g.flatten()[g_input.flatten() > 0].clamp(min=1e-10), 'g_activated_negative', i, self.epoch-1, hdf5_dataset_name=str(self.epoch-1))
+            # self.losses.histogram(abs_g.flatten()[g_input.flatten() < 0].clamp(min=1e-10), 'g_activated_positive', i, self.epoch-1, hdf5_dataset_name=str(self.epoch-1))
+
+            self.losses.histogram(abs_g.flatten().clamp(min=1e-10).log10(), 'g', i)
+            self.losses.histogram(abs_g.flatten()[g_input.flatten() != 0].clamp(min=1e-10).log10(), 'g_activated', i)
+            # self.losses.histogram(g_input.flatten().sign()[g_input.flatten() != 0], 'g_sign', i)
+            # self.losses.histogram(abs_g.flatten()[g_input.flatten() > 0].clamp(min=1e-10).log10(), 'g_activated_negative', i)
+            # self.losses.histogram(abs_g.flatten()[g_input.flatten() < 0].clamp(min=1e-10).log10(), 'g_activated_positive', i)
+
+            h.clean()
+        self.count += 1
+    def _log_entropy(self, abs_g: torch.Tensor):
+        normalized_g = abs_g / abs_g.sum(dim=-1, keepdim=True)
+        entropy = - normalized_g * normalized_g.log2()
+        regularized_entropy = entropy.nan_to_num(0, 0, 0)
+        return regularized_entropy
+    def _log_std_mean(self, abs_g: torch.Tensor):
+        std, mean = torch.std_mean(abs_g, -1)
+        return {
+            'std': std,
+            'mean': mean,
+            'relative': std / mean
+        }
+    def _log_min_mean_max(self, abs_g: torch.Tensor):
+        return {
+            'min': abs_g.min(dim=-1)[0],
+            'mean': abs_g.mean(dim=-1),
+            'max': abs_g.max(dim=-1)[0]
+        }
+    # def _log_gini(self, abs_g: torch.Tensor):
+        # diff = (abs_g.unsqueeze(dim=-1) - abs_g.unsqueeze(dim=-2)).abs_()
+        # return diff.mean(dim=[-1, -2]) / 2 / abs_g.mean(dim=-1)
+    def _log_kurtosis(self, abs_g: torch.Tensor):
+        """How long-tailed a distribution it is
+        """
+        std, mean = torch.std_mean(abs_g, -1, keepdim=True)
+        standardized_g = (abs_g - mean) / std
+        return (standardized_g ** 4).mean(dim=-1)
+
+    def after_minibatch_backward(self):
+        with torch.no_grad():
+            self.do_logs()

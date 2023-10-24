@@ -1,7 +1,7 @@
 import os
 from typing import Any
 import torch
-from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager
+from ..base import new_experiment, Model, Wrapper, ERM, start_tensorboard_server, replace_config, SpecialReplacement, LossManager, Plugin
 from .hooks import ActivationObservationPlugin, GradientNoisePlugin, SimilarityPlugin, ParameterChangePlugin, ActivationDistributionPlugin, DiagonalityPlugin, SpectralObservationPlugin, EffectiveGradientSparsity, SpectralIncreasePlugin, VGradientObservationPlugin
 from .activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU, MixedActivation, LinearActivationMixing
 from .robustness import RestrictAffinePlugin, DoublyBiased, ZerothBiasPlugin
@@ -23,6 +23,7 @@ class Sparsify:
         model_type=Model, 
         wrapper_type=Wrapper,
         magic_residual=False,
+        manual_plugins: 'list[Plugin]'=None,
     ) -> None:
         self.activations = []
         self.mlps = []
@@ -48,8 +49,8 @@ class Sparsify:
 
         print(self.scheduling)
 
+        self.manual_plugins = manual_plugins
 
-    
     def extract_linear_layers(self, mlp) -> 'dict[str, torch.nn.Linear]':
         pass
 
@@ -98,7 +99,7 @@ class Sparsify:
     def skip_connection_filter(self, path: str, module: torch.nn.Module):
         raise NotImplemented()
 
-    def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False):
+    def _make_model(self, model, finetuning, has_obs=True, use_mixed_activation=False, force_obs=None):
         obs: 'list[torch.nn.Module]' = [
             RestrictAffinePlugin(
                 log_per_step=self.log_per_step, 
@@ -117,6 +118,12 @@ class Sparsify:
                 if ob is not None:
                     assert len(list(ob.parameters())) == 0
             obs = []
+        
+        if force_obs is not None:
+            if isinstance(force_obs, list):
+                obs = force_obs
+            else:
+                obs = force_obs()
         
         model = self.model_type(
             self.wrapper_type(model),
@@ -170,7 +177,7 @@ class Sparsify:
         if finetuning is not None:
             model = self._make_model(main, finetuning, has_obs=False)
 
-            if self.lora_r is not None:
+            if self.lora_r is not None and self.lora_r > 0:
                 from .lora import LoRAfy
                 model = LoRAfy(self.lora_r)(model)
                 strict = False
@@ -208,7 +215,7 @@ class Sparsify:
             main = MagicSynapse.plug_in(model=main, rho=self.rho, filter=self.magic_synapse_filter, skip_connections=self.magic_residual, skip_connection_filer=self.skip_connection_filter)
             print("MagicSynapse: Finished")
         
-        model = self._make_model(main, finetuning, has_obs=True, use_mixed_activation=mixed_activation).to(device)
+        model = self._make_model(main, finetuning, has_obs=True, use_mixed_activation=mixed_activation, force_obs=self.manual_plugins).to(device)
 
         model.iteration = steps if steps is not None else epoch_size * start_epoch 
         model.epoch = start_epoch

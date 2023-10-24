@@ -75,6 +75,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
             with torch.cuda.amp.autocast(enabled=scaler is not None):
                 with torch.autograd.profiler.record_function("forward propagation"):
                     minibatch_output = model(minibatch_image)
+                    assert minibatch_output.requires_grad
                     minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
 
                 assert minibatch_loss.requires_grad
@@ -397,15 +398,35 @@ def main(args):
     if args.transformer_embedding_decay is not None:
         for key in ["class_token", "position_embedding", "relative_position_bias_table"]:
             custom_keys_weight_decay.append((key, args.transformer_embedding_decay))
-    parameters = utils.set_weight_decay(
-        model,
-        args.weight_decay,
-        norm_weight_decay=args.norm_weight_decay,
-        custom_keys_weight_decay=custom_keys_weight_decay if len(custom_keys_weight_decay) > 0 else None,
-        initial_lr=args.lr,
-    )
+    
+    if not args.gradient_density_only:
+        parameters = utils.set_weight_decay(
+            model,
+            args.weight_decay,
+            norm_weight_decay=args.norm_weight_decay,
+            custom_keys_weight_decay=custom_keys_weight_decay if len(custom_keys_weight_decay) > 0 else None,
+            initial_lr=args.lr,
+        )
+    else:
+        model.requires_grad_(False)
+        for name, p in model.named_parameters():
+            if 'pos_embedding' in name:
+                p.requires_grad = True
+        def get_epoch(s: str):
+            s = s.split('/')[-1]
+            s = s[:s.find('.pth')]
+            s = s[s.find('model_') + len('model_'):]
+            if s.isdigit():
+                return int(s) + 1
+            else:
+                return 299 + 1
+        model.iteration = get_epoch(args.finetune or args.resume) * len(data_loader)
+        parameters = [{"params": model.parameters(), "initial_lr": 0, "momentum": 0, "weight_decay": 0.0}]
+        args.max_iteration = args.max_iteration + get_epoch(args.finetune or args.resume) * len(data_loader)
+        model.epoch = get_epoch(args.finetune or args.resume)
 
     opt_name = args.opt.lower()
+
     if opt_name.startswith("sgd"):
         optimizer = torch.optim.SGD(
             parameters,
@@ -502,6 +523,12 @@ def main(args):
         if scaler:
             scaler.load_state_dict(checkpoint["scaler"])
 
+    if args.gradient_density_only:
+        for g in optimizer.param_groups:
+            g['initial_lr'] = 0.0
+            g['lr'] = 0.0
+        lr_scheduler.base_lrs = [0] * len(lr_scheduler.base_lrs)
+
     if args.test_only:
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
         torch.backends.cudnn.benchmark = False
@@ -514,7 +541,7 @@ def main(args):
 
     def train_epochs():
         print("Start training")
-        if args.finetune and not args.resume:
+        if args.finetune and not args.resume and not args.no_testing:
             if args.test_training_samples > 0:
                 evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples, adversarial_eps=args.adversarial_eps)
             evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing, adversarial_eps=args.adversarial_eps)
@@ -530,9 +557,10 @@ def main(args):
                     if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
                         break
                     lr_scheduler.step()
-                    if args.test_training_samples > 0:
-                        evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples, adversarial_eps=args.adversarial_eps)
-                    evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing, adversarial_eps=args.adversarial_eps)
+                    if not args.no_testing:
+                        if args.test_training_samples > 0:
+                            evaluate(model, criterion, data_loader_test_trainig_samples, device=device, adversarial=args.adversarial_testing, log_suffix="Training Samples", n_step=args.test_training_samples, adversarial_eps=args.adversarial_eps)
+                        evaluate(model, criterion, data_loader_test, device=device, adversarial=args.adversarial_testing, adversarial_eps=args.adversarial_eps)
                     if model_ema:
                         evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
                     if args.output_dir:
@@ -718,6 +746,8 @@ def get_args_parser(add_help=True):
     parser.add_argument("--adversarial-eps", action="store_const", const=parse_epsilon, dest="adversarial_esp", default="1/255")
     parser.add_argument("--test-training-samples", type=int, default=0, help="step number to test training samples in every evaluation")
     parser.add_argument("--magic-residual", action="store_true")
+    parser.add_argument("--gradient-density-only", action="store_true")
+    parser.add_argument("--no-testing", action="store_true")
     return parser
 
 

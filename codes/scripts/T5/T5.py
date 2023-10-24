@@ -614,8 +614,8 @@ class HfWrapper(Wrapper):
         return self.model.get_input_embeddings()
 
 class T5Sparsify(Sparsify):
-    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={"activation_mixing_iteration":None, "layernorm_uplifting_iteration": None}, lora_r=None, do_train=True) -> None:
-        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, scheduling, lora_r, HfModel, HfWrapper)
+    def __init__(self, db_mlp: bool, jsrelu: bool, magic_synapse: bool, restricted_affine: bool = None, zeroth_bias_clipping=0.1, db_mlp_shape=None, rho=0.1, log_per_step=10, scheduling={"activation_mixing_iteration":None, "layernorm_uplifting_iteration": None}, lora_r=None, do_train=True, manual_plugins: 'list[Plugin]'=None,) -> None:
+        super().__init__(db_mlp, jsrelu, magic_synapse, restricted_affine, zeroth_bias_clipping, db_mlp_shape, rho, log_per_step, scheduling, lora_r, HfModel, HfWrapper, manual_plugins=manual_plugins)
         self.mlp_types = [T5DenseActDense]
         self.do_train = do_train
 
