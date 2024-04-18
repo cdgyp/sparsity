@@ -21,7 +21,7 @@ do
         else
             extra=" "
         fi
-        max_steps=$((checkpoint + gradient_accumulated_steps))
+        max_steps=$((checkpoint + gradient_accumulated_steps * 334))
         torchrun --nproc_per_node $n_visible_devices --rdzv_backend=c10d module_wrapper.py codes.scripts.T5.T5  \
             --model_type                t5                      \
             --config_name               hf_caches/t5-base       \
@@ -37,18 +37,18 @@ do
             --max_steps                     $max_steps\
             --learning_rate                 0.0     \
             --weight_decay                  0.0     \
-            --warmup_steps                  10000   \
+            --warmup_steps                  0       \
             --logging_steps                 1       \
-            --save_steps                    5000    \
-            --eval_steps                    5000    \
+            --save_steps                    10000000000    \
+            --eval_steps                    10000000000    \
             --from_disk                             \
             --dataset_name              'data/c4'   \
             --max_seq_length                512     \
             --gradient_checkpointing                \
             --resume runs/T5/from_scratch/$model/*/save/checkpoint-$checkpoint \
             --post_training_only                    \
-            --gradient_density_only                 \
-            --title gradient_density                \
+            --augmented_flatness_only               \
+            --title augmented_flatness              \
             $extra                                  \
             "$@"
     done

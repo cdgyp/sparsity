@@ -1,12 +1,12 @@
 import os
 import gc
 import torch
-from torch import nn
-from codes.base import Plugin
+from torch import nn, Tensor
+from codes.base import LossManager, Plugin
 from codes.base.base import BaseModule, Plugin, ModuleReference
 from torch import einsum
 
-from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config
+from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config, LossManager
 # from .vit import ViT, FeedForward
 # from .relu_vit import MLPBlock
 from .activations import CustomizedActivation, ActivationPosition
@@ -875,6 +875,7 @@ class GradientDensityPlugin(HookingPlugin):
         self.use_iteration = use_iteration
         self.log_range = log_range
         self.min_iteration = None
+        self.register_full_backward_pre_hook
     def is_hook_active(self):
         return True
     def register(self, main: BaseModule, plugins: 'list[Plugin]'):
@@ -954,3 +955,101 @@ class GradientDensityPlugin(HookingPlugin):
     def after_minibatch_backward(self):
         with torch.no_grad():
             self.do_logs()
+
+class InputHook(ForwardHook):
+    def __init__(self) -> None:
+        super().__init__()
+        self.inputs: torch.Tensor = None
+    def __call__(self, module: nn.Module, input, output):
+        assert isinstance(input, tuple), type(input)
+        assert len(input) == 1, len(input)
+        self.inputs = input[0]
+class ForwardBackwardHook(BackwardHook):
+        def __init__(self, name, forward_hook: InputHook, losses:LossManager) -> None:
+            super().__init__()
+            self.forward_hook = forward_hook
+            self.losses = losses
+            self.name = name
+        def __call__(self, module: nn.Module, grad_input, grad_output):
+            assert (isinstance(grad_output, tuple) and len(grad_output) == 1) or isinstance(grad_output, torch.Tensor), grad_output
+            inputs = self.forward_hook.inputs
+            grad = grad_output[0].to_dense().float() if isinstance(grad_output, tuple) else grad_output.to_dense().float()
+            with torch.no_grad():
+                self.__combined_call__(module, inputs, grad)
+        
+        def __combined_call__(self, module: nn.Module, inputs: Tensor, grad_output: Tensor):
+            pass
+
+
+class CoefficientPlugin(Plugin):
+    class AugmentedFlatnessHook(ForwardBackwardHook):
+        def __combined_call__(self, module: nn.Module, inputs: Tensor, grad_output: Tensor):
+            assert len(grad_output.shape) == 3 and len(inputs.shape) == 3, (grad_output.shape, inputs.shape)
+            augmented_flatness = ((grad_output ** 2).sum(dim=-1) * (inputs ** 2).sum(dim=-1)).sum(dim=1)
+            self.losses.observe(augmented_flatness.mean(), 'augmented_flatness', self.name)
+
+    class L0CoefficientHook(ForwardBackwardHook):
+        # On activations
+        def __init__(self, name, forward_hook_key_layer: InputHook, forward_hook_activation: InputHook, losses: LossManager) -> None:
+            super().__init__(name, forward_hook_key_layer, losses)
+            self.activation_hook = forward_hook_activation
+        def __combined_call__(self, module: nn.Module, X: Tensor, grad_A: Tensor):
+            A = self.activation_hook.inputs
+            X_norm = (X**2).sum(dim=-1)
+            mask = A > 0
+            sum = (grad_A * mask * X_norm.unsqueeze(dim=-1)).mean()
+            weight = mask.float().mean()
+            self.losses.observe(sum, 'coefficients_L0', 'sum', self.name)
+            self.losses.observe(weight, 'coefficients_L0', 'weight', self.name)
+            self.losses.observe(sum/weight, 'coefficients_L0', 'preview', self.name)
+
+
+    class L2CoefficientHook(ForwardBackwardHook):
+        # On Value Layers
+        def __combined_call__(self, module: nn.Module, inputs: Tensor, grad_Z: Tensor):
+            norms = (grad_Z ** 2).sum(dim=-1)
+            self.losses.observe(norms.mean(), 'coefficients_L2', self.name)
+
+    def __init__(self, is_MLP, get_linear_layers, activation_function_filter):
+        super().__init__()
+        self.is_MLP = is_MLP
+        self.get_linear_layer = get_linear_layers
+        self.activation_function_filter = activation_function_filter
+        self.L0_hooks = []
+        self.L2_hooks = []
+
+    def hook_block(self, name, MLPBlock: nn.Module):
+        linear_layers = self.get_linear_layer(MLPBlock)
+        activation_function = None
+        for subname, module in MLPBlock.named_modules():
+            if self.activation_function_filter(name, subname, module):
+                assert activation_function is None, (name, MLPBlock)
+                activation_function = module
+        assert activation_function is not None, (name, MLPBlock)
+        key_input_hook = InputHook()
+        value_input_hook = InputHook()
+        activation_input_hook = InputHook()
+
+        key_input_hook.hook_on(linear_layers['key'], name)
+        value_input_hook.hook_on(linear_layers['value'], name)
+        activation_input_hook.hook_on(activation_input_hook)
+
+        L0_hook = self.L0CoefficientHook(name, key_input_hook, activation_input_hook, self.losses)
+        L0_hook.hook_on(activation_function)
+
+        L2_hook = self.L2CoefficientHook(name, value_input_hook, self.losses)
+        L2_hook.hook_on(linear_layers['value'])
+
+        self.L0_hooks.append(L0_hook)
+        self.L2_hooks.append(L2_hook)
+
+
+    def register(self, main: BaseModule, plugins: list[Plugin]):
+        for name, module in main.named_modules():
+            if self.is_MLP(name, module):
+                self.hook_block(name, module)
+
+    def prepare(self, X: Tensor, Y: Tensor, labeled: Tensor, D: Tensor):
+        for (l0, l2) in zip(self.L0_hooks, self.L2_hooks):
+            l0.losses = self.losses
+            l2.losses = self.losses

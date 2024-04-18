@@ -90,6 +90,7 @@ from  ...base import LossManager, start_tensorboard_server, Model, Wrapper
 from ...modules.sparsify import Sparsify
 from ...modules.robustness import DoublyBiased
 from ...modules.activations import JumpingSquaredReLU, CustomizedReLU, ActivationPosition, CustomizedGELU
+from ...modules.hooks import CoefficientPlugin
 from .subclasses import CustomSeq2SeqTrainer, CustomSeq2SeqTrainingArgument
 from .data import get_eval_dataset
 
@@ -196,7 +197,9 @@ class EtcArguments:
     scan_eval: bool = field(default=None, metadata={"help": "Evaluate all checkpoints. If this option is turned on, then `resume` indicates the directory holding all checkpoints instead of a single one"})
     dir_to_checkpoints: str = field(default=None)
     
+    post_training_only: bool = field(default=False, metadata={"help": ""})
     gradient_density_only: bool = field(default=False, metadata={"help": "If turned on, the whole program is run only to measure the distribution of gradients back propagated to activations. Training, evaluation and most plugins will be turned off. Use in companion with option `--resume`."})
+    augmented_flatness_only: bool = field(default=False, metadata={"help": "If turned on, the whole program is run only to measure the distribution of gradients back propagated to activations. Training, evaluation and most plugins will be turned off. Use in companion with option `--resume`."})
 
 
 @dataclass
@@ -741,8 +744,36 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
     from ...modules.hooks import GradientDensityPlugin
     from ...modules.robustness import RestrictAffinePlugin
 
-    if etc_args.gradient_density_only:
+    if etc_args.post_training_only:
         os.makedirs('runs/T5/' + training_args.title + '/' + ('sparsified' if model_args.jsrelu else 'vanilla'), exist_ok=True)
+
+    if etc_args.post_training_only:
+        if etc_args.gradient_density_only: 
+            manual_plugins = [
+                RestrictAffinePlugin(
+                    log_per_step=training_args.logging_steps, 
+                    finetuning=False, 
+                    uplift_iterations=10000
+                ) if model_args.restricted_affine else None,
+                GradientDensityPlugin([T5DenseActDense], use_iteration=True, log_range=[-40, 0]),
+            ] 
+        if etc_args.augmented_flatness_only:
+            manual_plugins = [
+                RestrictAffinePlugin(
+                    log_per_step=training_args.logging_steps, 
+                    finetuning=False, 
+                    uplift_iterations=10000
+                ) if model_args.restricted_affine else None,
+                CoefficientPlugin(
+                    partial(T5Sparsify.is_MLP, None).
+                    partial(T5Sparsify.extract_linear_layers, None),
+                    partial(T5Sparsify.activation_function_filter, None)
+                )
+            ] 
+
+    else:
+        manual_plugins = None
+
 
     model, writer, output_dir = T5Sparsify(
         db_mlp=model_args.db_mlp,
@@ -756,21 +787,12 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
         scheduling={"activation_mixing_iteration": finetuning_args.activation_mixing_steps, "layernorm_uplifting_iteration": finetuning_args.layernorm_uplifting_steps},
         lora_r=finetuning_args.lora_r,
         do_train=training_args.do_train,
-        manual_plugins=(
-            [
-                RestrictAffinePlugin(
-                    log_per_step=training_args.logging_steps, 
-                    finetuning=False, 
-                    uplift_iterations=10000
-                ) if model_args.restricted_affine else None,
-                GradientDensityPlugin([T5DenseActDense], use_iteration=True, log_range=[-40, 0]),
-            ]   if etc_args.gradient_density_only else None
-        )
+        manual_plugins=manual_plugins
     )(
         'T5', 
         training_args.title,
         T5,
-        resume=training_args.resume if not etc_args.gradient_density_only else 'runs/T5/' + training_args.title + '/' + ("sparsified" if model_args.jsrelu else "vanilla"),
+        resume=training_args.resume if not etc_args.post_training_only else 'runs/T5/' + training_args.title + '/' + ("sparsified" if model_args.jsrelu else "vanilla"),
         finetuning=finetuning_args.finetune,
         steps=0,
         start_epoch=0,
@@ -789,7 +811,7 @@ def get_model(config, tokenizer, model_args: ModelArguments, training_args: Trai
 
         model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
     
-    if etc_args.gradient_density_only:
+    if etc_args.post_training_only:
         model.requires_grad_(False)
         for m in model.modules():
             if isinstance(m, nn.Embedding):
@@ -997,7 +1019,7 @@ def main():
         model_args, data_args, training_args, finetuning_args, etc_args = parser.parse_args_into_dataclasses()
     model_args: ModelArguments; data_args: DataTrainingArguments; training_args: TrainingArguments; finetuning_args: FinetuningArguments; etc_args: EtcArguments
 
-    if etc_args.gradient_density_only:
+    if etc_args.post_training_only:
         training_args.do_eval = False
         training_args.learning_rate = 0
         training_args.weight_decay = 0
@@ -1015,7 +1037,7 @@ def main():
 
     _arg = Seq2SeqTrainingArguments(training_args.output_dir)
 
-    if not etc_args.gradient_density_only:
+    if not etc_args.post_training_only:
         enable_full_determinism(seed=training_args.seed + _arg.local_rank)
 
     # Setup logging
@@ -1293,7 +1315,7 @@ def main():
         # warmup_ratio=0,
         remove_unused_columns=False,
         # reproducibility
-        full_determinism=True if not etc_args.gradient_density_only else False,
+        full_determinism=True if not etc_args.post_training_only else False,
         seed=training_args.seed + dist.get_rank(),
         # fp16=True, # open automatic mixed precision
         dataloader_num_workers=16,

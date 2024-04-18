@@ -399,7 +399,7 @@ def main(args):
         for key in ["class_token", "position_embedding", "relative_position_bias_table"]:
             custom_keys_weight_decay.append((key, args.transformer_embedding_decay))
     
-    if not args.gradient_density_only:
+    if not args.post_training_only:
         parameters = utils.set_weight_decay(
             model,
             args.weight_decay,
@@ -523,7 +523,7 @@ def main(args):
         if scaler:
             scaler.load_state_dict(checkpoint["scaler"])
 
-    if args.gradient_density_only:
+    if args.post_training_only:
         for g in optimizer.param_groups:
             g['initial_lr'] = 0.0
             g['lr'] = 0.0
@@ -550,11 +550,17 @@ def main(args):
         with torch.autograd.profiler.profile(use_cuda=True, with_flops=True, with_stack=True, enabled=False) as prof:
             start_time = time.time()
             for epoch in range(args.start_epoch, args.physical_epochs):
+                if args.augmented_flatness_only:
+                    initial_step = model.iteration
                 with torch.autograd.profiler.record_function("training"):
                     if args.distributed:
                         train_sampler.set_epoch(epoch)
                     train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
                     if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
+                        break
+                    if args.augmented_flatness_only:
+                        model.losses.log_losses(global_step=initial_step, csv=True)
+                        model.losses.writer.flush()
                         break
                     lr_scheduler.step()
                     if not args.no_testing:
@@ -728,6 +734,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--dont-resume-lr-schedulers", action="store_true")
     parser.add_argument("--warmup_phase", type=float, default=1.0, help="length relative to 2 Pi, indicating how many epochs are under warmup")
     parser.add_argument("--max-iteration", type=int, default=None, help="maximum number of iterations, only used in profiling")
+    parser.add_argument("--max-epoch", type=int, default=None)
     parser.add_argument("--restricted-affine", action='store_true', help="whether to force off bias and force scaling factors >=1 in LayerNorm layers.")
     parser.add_argument("--magic-synapse", action='store_true')
     parser.add_argument("--magic-synapse-rho", type=float, default='0.1')
@@ -746,7 +753,9 @@ def get_args_parser(add_help=True):
     parser.add_argument("--adversarial-eps", action="store_const", const=parse_epsilon, dest="adversarial_esp", default="1/255")
     parser.add_argument("--test-training-samples", type=int, default=0, help="step number to test training samples in every evaluation")
     parser.add_argument("--magic-residual", action="store_true")
+    parser.add_arugment("--post-training-only", action='store_true')
     parser.add_argument("--gradient-density-only", action="store_true")
+    parser.add_argument("--augmented-flatness-only", action="store_true")
     parser.add_argument("--no-testing", action="store_true")
     return parser
 

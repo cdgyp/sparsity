@@ -8,7 +8,7 @@ from ...base import Model, Wrapper
 from ...modules.sparsify import Sparsify
 from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, EncoderBlock, ResidualConnection
 from ...modules.robustness import DoublyBiased, RestrictAffinePlugin
-from ...modules.hooks import GradientDensityPlugin
+from ...modules.hooks import GradientDensityPlugin, CoefficientPlugin
 
 from torch.distributed import get_rank
 
@@ -66,9 +66,36 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
 
-    if args.gradient_density_only:
+    if args.post_training_only:
         os.makedirs('runs/imagenet1k/' + args.title + '/' + model_type, exist_ok=True)
-    
+
+    if args.post_training_only:
+        if args.gradient_density_only:
+            manual_plugins = [
+                RestrictAffinePlugin(
+                    log_per_step=args.log_per_step, 
+                    finetuning=False, 
+                    uplift_iterations=10000
+                ) if sparsified else None,
+                GradientDensityPlugin([MLPBlock]),
+            ] 
+        if args.augmented_flatness_only:
+            manual_plugins = [
+                RestrictAffinePlugin(
+                    log_per_step=args.log_per_step, 
+                    finetuning=False, 
+                    uplift_iterations=10000
+                ) if sparsified else None,
+                CoefficientPlugin(
+                    partial(ImageNet1kSparsify.is_MLP, None),
+                    partial(ImageNet1kSparsify.extract_linear_layers, None),
+                    partial(ImageNet1kSparsify.activation_function_filter, None)
+                ),
+            ] 
+    else:
+        manual_plugins = None
+
+
     model, _, output_dir = ImageNet1kSparsify(
         db_mlp=sparsified,
         jsrelu=sparsified,
@@ -80,21 +107,12 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         scheduling={'activation_mixing_iteration': args.activation_mixing_epoch * len(dataloader), 'layernorm_uplifting_iteration': args.layernorm_uplifting_epoch * len(dataloader)},
         lora_r=args.lora_r,
         magic_residual=args.magic_residual,
-        manual_plugins=(
-            [
-                RestrictAffinePlugin(
-                    log_per_step=args.log_per_step, 
-                    finetuning=False, 
-                    uplift_iterations=10000
-                ) if sparsified else None,
-                GradientDensityPlugin([MLPBlock]),
-            ] if args.gradient_density_only else None
-        )
+        manual_plugins=manual_plugins
     )(
             'imagenet1k', 
             args.title + '/' + model_type,
             vit,
-            resume=args.resume if not args.gradient_density_only else 'runs/imagenet1k/' + args.title + '/' + model_type,
+            resume=args.resume if not args.post_training_only else 'runs/imagenet1k/' + args.title + '/' + model_type,
             finetuning=args.finetune,
             epoch_size=epoch_size,
             start_epoch=start_epoch,
