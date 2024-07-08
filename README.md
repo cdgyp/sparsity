@@ -16,7 +16,6 @@
 │   │   └── sparsify.py                     # putting all sparsification methods together for easier use
 │   └── scripts                             # task specific codes
 │       ├── after_training                  # eigenvalue decomposition to demonstrate spectral concentration
-│       ├── finetune.sh                     # deprecated
 │       ├── imagenet1k                      # codes for training and finetuning ViT-Base on ImageNet-1k
 │       ├── T5                              # codes for training and finetuning T5 on C4
 │       ├── manipulate.py                   # codes of experiments for validation, i.e., manipulating activation sparsity through gradient sparsity
