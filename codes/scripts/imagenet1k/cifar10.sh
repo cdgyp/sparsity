@@ -1,6 +1,6 @@
 export http_proxy=
 export https_proxy=
-batch_size=2048
+batch_size=$BATCH_SIZE
 n_visible_devices=$(echo $CUDA_VISIBLE_DEVICES | tr ',' '\n' | wc -l)
 batch_size_per_proc=$((batch_size / n_visible_devices))
 echo $batch_size_per_proc samples per process
@@ -17,16 +17,20 @@ do
         extra=" "
     fi
     torchrun --nproc_per_node=$n_visible_devices --rdzv_backend=c10d  module_wrapper.py codes.scripts.imagenet1k.imagenet1k   \
-        --model $model --start-epoch 0 --epochs 300 --batch-size-per-proc $batch_size_per_proc --physical-batch-size 64 --opt adamw --lr 0.003 --wd 0.3 \
+        --model $model --start-epoch 0 --epochs 150 --batch-size-per-proc $batch_size_per_proc --physical-batch-size 64 --opt adamw --lr 0.0001 --wd 0.05 \
         --from-scratch  \
-        --data-path 'data/imagenet1k256/ILSVRC/Data/CLS-LOC'    \
+        --data-path 'data/cifar10'    \
         --lr-scheduler cosineannealinglr    \
-        --label-smoothing 0.11 --mixup-alpha 0.2 --auto-augment ra    \
-        --clip-grad-norm 1 --ra-sampler --cutmix-alpha 1.0 \
+        --label-smoothing 0.11 \
+        --clip-grad-norm 1 --ra-sampler \
         --amp \
-        --log_per_step 100 --save-every-epoch 10 --physical-epochs 300 \
+        --log_per_step 25 --save-every-epoch 10 --physical-epochs 150 \
         --zeroth-bias-clipping 0.1\
         --fine-grained-checkpoints \
+	--mixup-alpha 0.2 	\
+	--cutmix-alpha 1.0      \
         $extra    \
         "$@"
 done
+
+--auto-augment ra    \

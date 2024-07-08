@@ -26,7 +26,7 @@ for shift_x in 1.6 -1.6
 do
 for shift_y in 1.6 -1.6
 do
-args="--title $title --lr $lr --optimizer $optimizer --num_classes $num_classes --n_epoch $n_epoch --weight_decay $weight_decay --dropout $dropout --batch_size $batch_size --grad_clipping $grad_clip --p $p --batchwise_reported $batchwise_reported --activation $activation_layer --pretrained $pretrained --half_interval $half_interval --shift_x $shift_x --shift_y $shift_y --rezero $rezero --careful_bias_initialization $careful_bias_initialization --zeroth-bias $zeroth_bias --alpha_x $alpha_x --alpha_y $alpha_y"
+args="--title $title --lr $lr --optimizer $optimizer --num_classes $num_classes --n_epoch $n_epoch --weight_decay $weight_decay --dropout $dropout --batch_size $batch_size --grad_clipping $grad_clip --p $p --batchwise_reported $batchwise_reported --activation $activation_layer --pretrained $pretrained --half_interval $half_interval --shift_x $shift_x --shift_y $shift_y --rezero $rezero --careful_bias_initialization $careful_bias_initialization --zeroth-bias $zeroth_bias --alpha_x $alpha_x --alpha_y $alpha_y $@"
 echo begin $args
 python -m codes.scripts.manipulate $args
 echo end $args

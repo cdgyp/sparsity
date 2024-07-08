@@ -80,6 +80,8 @@ class Shift(CustomizedActivation):
         self.alpha_y = alpha_y
     def forward(self, x):
         return  self.alpha_y * self.inner(self.alpha_x * (x - self.shift_x)) + self.shift_y
+    def derivative(self, x):
+        return self.alpha_y * self.inner.derivative(self.alpha_x * (x - self.shift_x)) * self.alpha_x
     def get_habitat(self):
         inner_habitat = self.inner.get_habitat()
         return {
@@ -112,6 +114,8 @@ class DenseReLU(CustomizedActivation):
 class SquaredReLU(CustomizedActivation):
     def forward(self, x: torch.Tensor):
         return torch.relu(x) ** 2
+    def derivative(self, x):
+        return (x >= 0) * (x )*2
     def get_habitat(self):
         return {
             "x": torch.tensor([[-1e32, 0]]),
@@ -205,6 +209,8 @@ class SShaped(CustomizedActivation):
         self.half_interval = abs(half_interval)
     def forward(self, x: torch.Tensor):
         return self.inner(x - self.half_interval) - self.inner(-x - self.half_interval)
+    def derivative(self, x: torch.Tensor):
+        return self.inner.derivative(x - self.half_interval) + self.inner.derivative(-x-self.half_interval)
     def get_habitat(self):
         inner_habitat = self.inner.get_habitat()
         inner_x_habitat = inner_habitat['x']

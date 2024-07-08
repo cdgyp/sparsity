@@ -8,6 +8,8 @@ def get_subtag(acc: EventAccumulator):
     try:
         return int(str_tag)
     except:
+        if str_tag == 'average':
+            return None 
         return str(str_tag)
     
 class Idel:
@@ -54,7 +56,7 @@ def tabulate_events(dpath, filter=None):
 
     summary_iterators = [EventAccumulator(os.path.join(dpath, dname)).Reload() for dname in os.listdir(dpath) if os.path.isdir(os.path.join(dpath, dname)) and _filter(dname)]
     summary_iterators = [it for it in summary_iterators if len(it.Tags()['scalars']) > 0]
-    summary_iterators = sorted(summary_iterators, key=lambda acc: get_subtag(acc))
+    summary_iterators = sorted([it for it in summary_iterators if get_subtag(it) is not None], key=lambda acc: get_subtag(acc))
 
     tags = summary_iterators[0].Tags()['scalars']
     print('tags:', tags)

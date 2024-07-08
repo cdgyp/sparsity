@@ -223,13 +223,13 @@ class Sparsify:
         model.epoch = start_epoch
         model.losses = LossManager(writer=writer)
         if tensorboard_server:
-            start_tensorboard_server(writer.logdir)
+            start_tensorboard_server(writer.logdir, reload_interval=1)
 
         if self.db_mlp and self.db_mlp_shape is None:
             # make parameters of dynamic modules of implicit adversarial samples ready
             assert dataloader is not None
             with torch.no_grad():
-                X, Y = next(iter(dataloader))
+                X, Y = list(next(iter(dataloader)))[:2]
                 pred = model(X.to(device)[:1])
                 if hasattr(model, 'clean'):
                     model.clean()

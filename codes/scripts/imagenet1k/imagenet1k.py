@@ -55,12 +55,16 @@ class ForwardingDistributedDataParallel(torch.nn.parallel.DistributedDataParalle
                 print("setattr", name, self.module.__class__)
             setattr(self.module, name, value)
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None):
+def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None, scaler=None, model_without_ddp=None):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ", device=device)
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
     metric_logger.add_meter("img/s", utils.SmoothedValue(window_size=10, fmt="{value}"))
     if hasattr(model, 'losses'): model.losses.reset()
+
+    save_every_iteration = 125 if epoch < 5 else 300
+    if epoch < 1:
+        save_every_iteration = 25
 
     header = f"Epoch: [{epoch}]"
     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
@@ -76,7 +80,15 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
                 with torch.autograd.profiler.record_function("forward propagation"):
                     minibatch_output = model(minibatch_image)
                     assert minibatch_output.requires_grad
-                    minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
+                    if len(minibatch_target.shape) > 1:
+                        minibatch_target = minibatch_target.argmax(dim=-1)
+                    if args.augmented_flatness_only and args.correct_samples_only:
+                        minibatch_loss = nn.functional.cross_entropy(minibatch_output, minibatch_target, reduce=None, reduction='none', label_smoothing=args.label_smoothing) / chunks
+                        minibatch_correct = minibatch_output.argmax(dim=-1) == minibatch_target
+                        minibatch_loss = (minibatch_loss * minibatch_correct).mean()
+                        model.losses.observe(minibatch_correct.float().mean(), 'augmented_flatness_acc')
+                    else:
+                        minibatch_loss = criterion(minibatch_output, minibatch_target) / chunks
 
                 assert minibatch_loss.requires_grad
                 with torch.autograd.profiler.record_function("backward"):
@@ -123,6 +135,16 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
         metric_logger.meters["acc5"].update(acc5.item(), n=batch_size)
         metric_logger.meters["img/s"].update(batch_size / (time.time() - start_time))
 
+        if (model.iteration + 1) % save_every_iteration == 0 and args.fine_grained_checkpoints and epoch < 10:
+            print("saving")
+            checkpoint = {
+                "model": model_without_ddp.state_dict(),
+                "epoch": epoch,
+                "args": args,
+            } # params only to save storage
+            utils.save_on_master(checkpoint, os.path.join(args.output_dir, 'save', f"param_{epoch}_{model.iteration + 1}.pth"))
+
+
         if hasattr(model, 'losses'):
             model.losses.observe(loss, 'loss')
             model.losses.observe(acc1 / 100, 'acc', 1)
@@ -131,7 +153,8 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
             if model.iteration % args.log_per_step == 0:
                 model.losses.log_losses(model.iteration)
             model.iteration += 1
-            model.losses.reset()
+            if not args.augmented_flatness_only:
+                model.losses.reset()
             if args.max_iteration is not None and model.iteration >= args.max_iteration:
                 return
 
@@ -237,6 +260,9 @@ def load_data(traindir, valdir, args):
     )
     interpolation = InterpolationMode(args.interpolation)
 
+    def cifar10_target_transform(y: Tensor):
+        return y.argmax(dim=-1)
+
     print("Loading training data")
     st = time.time()
     cache_path = _get_cache_path(traindir)
@@ -251,18 +277,33 @@ def load_data(traindir, valdir, args):
         random_erase_prob = getattr(args, "random_erase", 0.0)
         ra_magnitude = getattr(args, "ra_magnitude", None)
         augmix_severity = getattr(args, "augmix_severity", None)
-        dataset = torchvision.datasets.ImageFolder(
-            traindir,
-            presets.ClassificationPresetTrain(
-                crop_size=train_crop_size,
-                interpolation=interpolation,
-                auto_augment_policy=auto_augment_policy,
-                random_erase_prob=random_erase_prob,
-                ra_magnitude=ra_magnitude,
-                augmix_severity=augmix_severity,
-                backend=args.backend,
-            ),
-        )
+        if 'cifar10' in traindir:
+            dataset = torchvision.datasets.CIFAR10(
+                traindir,
+                True,
+                presets.ClassificationPresetTrain(
+                    crop_size=train_crop_size,
+                    interpolation=interpolation,
+                    auto_augment_policy=auto_augment_policy,
+                    random_erase_prob=random_erase_prob,
+                    ra_magnitude=ra_magnitude,
+                    augmix_severity=augmix_severity,
+                    backend=args.backend,
+                ),
+            )
+        else:
+            dataset = torchvision.datasets.ImageFolder(
+                traindir,
+                presets.ClassificationPresetTrain(
+                    crop_size=train_crop_size,
+                    interpolation=interpolation,
+                    auto_augment_policy=auto_augment_policy,
+                    random_erase_prob=random_erase_prob,
+                    ra_magnitude=ra_magnitude,
+                    augmix_severity=augmix_severity,
+                    backend=args.backend,
+                ),
+            )
         if args.cache_dataset:
             print(f"Saving dataset_train to {cache_path}")
             utils.mkdir(os.path.dirname(cache_path))
@@ -289,10 +330,17 @@ def load_data(traindir, valdir, args):
                 interpolation=interpolation,
                 backend=args.backend,
             )
-        dataset_test = torchvision.datasets.ImageFolder(
-            valdir,
-            preprocessing,
-        )
+        if 'cifar10' in valdir:
+            dataset_test = torchvision.datasets.CIFAR10(
+                valdir,
+                False,
+                preprocessing,
+            )
+        else:
+            dataset_test = torchvision.datasets.ImageFolder(
+                valdir,
+                preprocessing,
+            )
         if args.cache_dataset:
             print(f"Saving dataset_test to {cache_path}")
             utils.mkdir(os.path.dirname(cache_path))
@@ -336,8 +384,12 @@ def main(args):
     else:
         torch.backends.cudnn.benchmark = True
 
-    train_dir = os.path.join(args.data_path, "train")
-    val_dir = os.path.join(args.data_path, "val")
+    if 'cifar10' not in args.data_path:
+        train_dir = os.path.join(args.data_path, "train")
+        val_dir = os.path.join(args.data_path, "val")
+    else:
+        train_dir = args.data_path
+        val_dir = args.data_path
     dataset, dataset_test, train_sampler, test_sampler = load_data(train_dir, val_dir, args)
 
     collate_fn = None
@@ -415,14 +467,25 @@ def main(args):
         def get_epoch(s: str):
             s = s.split('/')[-1]
             s = s[:s.find('.pth')]
-            s = s[s.find('model_') + len('model_'):]
-            if s.isdigit():
-                return int(s) + 1
+            if s.find('param_') >= 0:
+                s = s[s.find('_') + len('_'):]
+                s = s[:s.find('_')]
+                return  int(s)
             else:
-                return 299 + 1
-        model.iteration = get_epoch(args.finetune or args.resume) * len(data_loader)
+                s = s[s.find('model_') + len('model_'):]
+                if s.isdigit():
+                    return int(s) + 1
+                else:
+                    return 299 + 1
+        def get_iteration(s: str):
+            s = s.split('/')[-1]
+            if 'param' in s:
+                return int(s.split('_')[-1].split('.')[0])
+            else:
+                return get_epoch(s) * len(data_loader)
+        model.iteration = get_iteration(args.finetune or args.resume)
         parameters = [{"params": model.parameters(), "initial_lr": 0, "momentum": 0, "weight_decay": 0.0}]
-        args.max_iteration = args.max_iteration + get_epoch(args.finetune or args.resume) * len(data_loader)
+        args.max_iteration = (args.max_iteration or 1000000000) + model.iteration 
         model.epoch = get_epoch(args.finetune or args.resume)
 
     opt_name = args.opt.lower()
@@ -514,13 +577,13 @@ def main(args):
 
     if args.resume:
         model_without_ddp.load_state_dict(checkpoint["model"])
-        if not args.test_only:
+        if not args.test_only and not args.post_training_only:
             optimizer.load_state_dict(checkpoint["optimizer"])
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             # lr_scheduler.step(lr_scheduler.last_epoch)
         if model_ema:
             model_ema.load_state_dict(checkpoint["model_ema"])
-        if scaler:
+        if scaler and not args.post_training_only:
             scaler.load_state_dict(checkpoint["scaler"])
 
     if args.post_training_only:
@@ -555,12 +618,12 @@ def main(args):
                 with torch.autograd.profiler.record_function("training"):
                     if args.distributed:
                         train_sampler.set_epoch(epoch)
-                    train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
-                    if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
-                        break
+                    train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler, model_without_ddp)
                     if args.augmented_flatness_only:
                         model.losses.log_losses(global_step=initial_step, csv=True)
                         model.losses.writer.flush()
+                        break
+                    if hasattr(model, 'iteration') and args.max_iteration is not None and model.iteration >= args.max_iteration:
                         break
                     lr_scheduler.step()
                     if not args.no_testing:
@@ -582,8 +645,8 @@ def main(args):
                         if scaler:
                             checkpoint["scaler"] = scaler.state_dict()
                         if epoch % args.save_every_epoch == 0:
-                            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-                        utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+                            utils.save_on_master(checkpoint, os.path.join(args.output_dir, 'save', f"model_{epoch}.pth"))
+                        utils.save_on_master(checkpoint, os.path.join(args.output_dir, 'save', "checkpoint.pth"))
 
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -750,13 +813,15 @@ def get_args_parser(add_help=True):
         if isinstance(eps, str):
             return eval(eps)
         return eps
-    parser.add_argument("--adversarial-eps", action="store_const", const=parse_epsilon, dest="adversarial_esp", default="1/255")
+    parser.add_argument("--adversarial-eps", action="store_const", const=parse_epsilon, dest="adversarial_eps", default="1/255")
     parser.add_argument("--test-training-samples", type=int, default=0, help="step number to test training samples in every evaluation")
     parser.add_argument("--magic-residual", action="store_true")
-    parser.add_arugment("--post-training-only", action='store_true')
+    parser.add_argument("--post-training-only", action='store_true')
     parser.add_argument("--gradient-density-only", action="store_true")
     parser.add_argument("--augmented-flatness-only", action="store_true")
+    parser.add_argument("--correct-samples-only", action="store_true")
     parser.add_argument("--no-testing", action="store_true")
+    parser.add_argument("--fine-grained-checkpoints", action="store_true")
     return parser
 
 

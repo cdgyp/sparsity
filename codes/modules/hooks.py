@@ -340,6 +340,7 @@ class ActivationObservationPlugin(HookingPlugin):
                 assert h.handle is not None
                 a, pre_a = h.get()
                 self.losses.observe(pre_a.mean(), 'pre_activation', i)
+                self.losses.observe(h.module.derivative(pre_a).square().mean(), 'derivative2', i)
                 if not self.pre_activation_only:
                     assert len(a.shape) > 1
                     great_than_zero = (a.abs() > 0).float()
@@ -558,7 +559,7 @@ class ActivationDistributionPlugin(HookingPlugin):
         res = torch.zeros_like(values, dtype=torch.bool)
         for range in ranges:
             res = res.logical_or_((range[0] <= values) & (values <= range[1]))
-        return res.float().mean()
+        return res.float()
     def do_logs(self):
         if self.logged:
             return
@@ -575,6 +576,17 @@ class ActivationDistributionPlugin(HookingPlugin):
                 self.losses.observe(self.fall_within(activations.flatten(), habitat['y']).mean(), f'activation_concentration_{status}', 'activation', i)
                 self.losses.observe(self.fall_within(pre_activations.flatten(), habitat['x']).mean(), f'activation_concentration_{status}', 'pre_activation', 'average')
                 self.losses.observe(self.fall_within(activations.flatten(), habitat['y']).mean(), f'activation_concentration_{status}', 'activation', 'average')
+
+                derivatives = h.module.derivative(pre_activations)
+
+                hh = habitat['x'][0]
+                hh[0] += 0.01
+                hh[1] -= 0.01
+                hh = [hh]
+
+                assert derivatives.flatten()[self.fall_within(pre_activations.flatten(), hh).bool()].square().mean() == 0, (derivatives.flatten()[self.fall_within(pre_activations.flatten(), hh).bool()].max(), )
+
+                self.losses.observe(derivatives.square().mean(), 'derivative2', i)
         self.logged = True
         self.clean()
         for h in self.hooks:
@@ -990,14 +1002,16 @@ class CoefficientPlugin(Plugin):
 
     class L0CoefficientHook(ForwardBackwardHook):
         # On activations
-        def __init__(self, name, forward_hook_key_layer: InputHook, forward_hook_activation: InputHook, losses: LossManager) -> None:
-            super().__init__(name, forward_hook_key_layer, losses)
-            self.activation_hook = forward_hook_activation
-        def __combined_call__(self, module: nn.Module, X: Tensor, grad_A: Tensor):
-            A = self.activation_hook.inputs
+        def __init__(self, name, forward_hook_activation, forward_hook_key_layer: InputHook, forward_hook_value: InputHook, losses: LossManager) -> None:
+            super().__init__(name, forward_hook_activation, losses)
+            self.key_hook = forward_hook_key_layer
+            self.value_hook = forward_hook_value
+        def __combined_call__(self, module: nn.Module, P: Tensor, grad_A: Tensor):
+            A = self.value_hook.inputs
+            X = self.key_hook.inputs
             X_norm = (X**2).sum(dim=-1)
             mask = A > 0
-            sum = (grad_A * mask * X_norm.unsqueeze(dim=-1)).mean()
+            sum = ((grad_A ** 2) * mask * X_norm.unsqueeze(dim=-1)).mean()
             weight = mask.float().mean()
             self.losses.observe(sum, 'coefficients_L0', 'sum', self.name)
             self.losses.observe(weight, 'coefficients_L0', 'weight', self.name)
@@ -1006,9 +1020,12 @@ class CoefficientPlugin(Plugin):
 
     class L2CoefficientHook(ForwardBackwardHook):
         # On Value Layers
-        def __combined_call__(self, module: nn.Module, inputs: Tensor, grad_Z: Tensor):
+        def __combined_call__(self, module: nn.Module, A: Tensor, grad_Z: Tensor):
             norms = (grad_Z ** 2).sum(dim=-1)
+
+            self.losses.observe((A **2 ).sum(dim=-1).mean(), 'a2', self.name)
             self.losses.observe(norms.mean(), 'coefficients_L2', self.name)
+            self.losses.observe(((A**2).sum(dim=-1) * norms).mean(), 'L2_term', self.name)
 
     def __init__(self, is_MLP, get_linear_layers, activation_function_filter):
         super().__init__()
@@ -1017,6 +1034,7 @@ class CoefficientPlugin(Plugin):
         self.activation_function_filter = activation_function_filter
         self.L0_hooks = []
         self.L2_hooks = []
+        self.af_hooks = []
 
     def hook_block(self, name, MLPBlock: nn.Module):
         linear_layers = self.get_linear_layer(MLPBlock)
@@ -1026,15 +1044,19 @@ class CoefficientPlugin(Plugin):
                 assert activation_function is None, (name, MLPBlock)
                 activation_function = module
         assert activation_function is not None, (name, MLPBlock)
+
+        assert isinstance(linear_layers['key'], nn.Linear), type(linear_layers['key'])
+        assert isinstance(linear_layers['value'], nn.Linear), type(linear_layers['value'])
+
         key_input_hook = InputHook()
         value_input_hook = InputHook()
         activation_input_hook = InputHook()
 
         key_input_hook.hook_on(linear_layers['key'], name)
         value_input_hook.hook_on(linear_layers['value'], name)
-        activation_input_hook.hook_on(activation_input_hook)
+        activation_input_hook.hook_on(activation_function)
 
-        L0_hook = self.L0CoefficientHook(name, key_input_hook, activation_input_hook, self.losses)
+        L0_hook = self.L0CoefficientHook(name, activation_input_hook, key_input_hook, value_input_hook, self.losses)
         L0_hook.hook_on(activation_function)
 
         L2_hook = self.L2CoefficientHook(name, value_input_hook, self.losses)
@@ -1042,6 +1064,14 @@ class CoefficientPlugin(Plugin):
 
         self.L0_hooks.append(L0_hook)
         self.L2_hooks.append(L2_hook)
+
+        key_af_hook = self.AugmentedFlatnessHook(name + '.key', key_input_hook, self.losses)
+        key_af_hook.hook_on(linear_layers['key'])
+        value_af_hook = self.AugmentedFlatnessHook(name + '.value', value_input_hook, self.losses)
+        value_af_hook.hook_on(linear_layers['value'])
+
+        self.af_hooks.append(value_af_hook)
+        self.af_hooks.append(key_af_hook)
 
 
     def register(self, main: BaseModule, plugins: list[Plugin]):
@@ -1053,3 +1083,5 @@ class CoefficientPlugin(Plugin):
         for (l0, l2) in zip(self.L0_hooks, self.L2_hooks):
             l0.losses = self.losses
             l2.losses = self.losses
+        for af in self.af_hooks:
+            af.losses = self.losses

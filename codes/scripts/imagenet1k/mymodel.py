@@ -9,6 +9,7 @@ from ...modules.sparsify import Sparsify
 from ...modules.relu_vit import relu_vit_b_16, ViT_B_16_Weights, MLPBlock, EncoderBlock, ResidualConnection
 from ...modules.robustness import DoublyBiased, RestrictAffinePlugin
 from ...modules.hooks import GradientDensityPlugin, CoefficientPlugin
+from ...modules.activations import ActivationPosition
 
 from torch.distributed import get_rank
 
@@ -61,7 +62,7 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
         args.restricted_affine=True
 
     vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch and not args.finetune else None, progress=True, wide=args.wide, **{
-        'num_classes': 1000,
+        'num_classes': 10 if 'cifar10' in args.data_path else 1000,
         'rezero': False,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
@@ -87,9 +88,9 @@ def get_imagenet1k_model(model_type: str, dataloader: DataLoader, args=None, epo
                     uplift_iterations=10000
                 ) if sparsified else None,
                 CoefficientPlugin(
-                    partial(ImageNet1kSparsify.is_MLP, None),
+                    lambda name,m: isinstance(m, MLPBlock),
                     partial(ImageNet1kSparsify.extract_linear_layers, None),
-                    partial(ImageNet1kSparsify.activation_function_filter, None)
+                    lambda path, name, m: isinstance(m, ActivationPosition)
                 ),
             ] 
     else:

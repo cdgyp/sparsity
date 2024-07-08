@@ -22,6 +22,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--title', type=str, default='vit')
 parser.add_argument('--image_size', type=int, default=224)
 parser.add_argument('--batch_size', type=int, default=64)
+parser.add_argument('--physical_batch_size', type=int, default=None)
 parser.add_argument('--dropout', type=float, default=0.1)
 parser.add_argument('--lr', type=float, default=1e-4)
 parser.add_argument('--optimizer', type=str, default='SGD', choices=['SGD', 'Adam', 'RMSprop'])
@@ -51,9 +52,11 @@ parser.add_argument('--resume', type=str, default=None)
 all_args = parser.parse_known_args()
 args = all_args[0]
 
+if args.physical_batch_size is None: args.physical_batch_size = args.batch_size
 
-print('not known params', all_args[1])
-writer, ref_hash = new_experiment(args.title + '/' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
+
+print('unknown params', all_args[1])
+# writer, ref_hash = new_experiment(args.title + '/' + str(replace_config(args, title=SpecialReplacement.DELETE)), args)
 
 if args.activation_layer == 'relu':
     make_activation_layer = CustomizedReLU
@@ -92,8 +95,8 @@ test_transforms = transforms.Compose([
 ])
 
 if args.dataset == 'cifar10':
-    train_dataset = CIFAR10('/data/cifar10', True, transform=train_transforms, download=True)
-    test_dataset = CIFAR10('/data/cifar10', False, transform=test_transforms, download=True)
+    train_dataset = CIFAR10('data/cifar10', True, transform=train_transforms, download=True)
+    test_dataset = CIFAR10('data/cifar10', False, transform=test_transforms, download=True)
 elif args.dataset == 'imagenet1k':
     train_dataset = ImageFolder('data/imagenet1k256/ILSVRC/Data/CLS-LOC/train', transform=train_transforms)
     test_dataset = ImageFolder('data/imagenet1k256/ILSVRC/Data/CLS-LOC/val', transform=test_transforms)
@@ -107,39 +110,73 @@ def make_dataloaders(dataset: ImageFolder):
     # subset = WrapperDataset(Subset(dataset, indices))
     subset = WrapperDataset(dataset)
 
-    dataloader = DataLoader(subset, args.batch_size, True, num_workers=8, drop_last=True)
+    dataloader = DataLoader(subset, args.physical_batch_size, True, num_workers=8, drop_last=True)
 
     return dataloader
 
 train_dataloader = make_dataloaders(train_dataset)
 test_dataloader = make_dataloaders(test_dataset)
 
-observation = ActivationObservationPlugin(p=args.p, depth=12, batchwise_reported=bool(args.batchwise_reported), log_per_step=args.log_per_step)
+# observation = ActivationObservationPlugin(p=args.p, batchwise_reported=bool(args.batchwise_reported), log_per_step=args.log_per_step)
+
+def plot_activation(activation: nn.Module):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+    x = torch.linspace(-5,5,10000, requires_grad=True)
+    y = activation(x)
+    derivative = activation.derivative(x)
+    x_grad = torch.autograd.grad(y, x, torch.ones_like(x), create_graph=True)[0]
+    fig, ax = plt.subplots()
+    ax.plot(x.detach().cpu().numpy(), y.detach().cpu().numpy(), label="activation")
+    ax.plot(x.detach().cpu().numpy(), x_grad.detach().cpu().numpy(), label='derivative_auto_grad')
+    ax.plot(x.detach().cpu().numpy(), derivative.detach().cpu().numpy(), label='derivative', color='red', linestyle='--')
+    habitat = activation.get_habitat()
+    for h in habitat['x']:
+        plt.hlines(-1, h[0], h[1])
+    # plt.legend()
+    canvas = FigureCanvas(fig)
+    canvas.draw()
+    width, height = fig.get_size_inches() * fig.get_dpi()
+    image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8').reshape(int(height), int(width), 3)
+    image = torch.tensor(image).permute(2,0,1).float() / 256
+
+    print(image.shape)
+
+    return image
+
+
+
+activation_maker = lambda: ActivationPosition(Shift(
+                make_activation_layer(), 
+                shift_x=args.shift_x, shift_y=args.shift_y,
+                alpha_x=args.alpha_x, alpha_y=args.alpha_y
+            ))
 
 def make_model(
     model_type: str, 
     args,
     dataloader
 ):
-    vit = relu_vit_b_16(weights=ViT_B_16_Weights.IMAGENET1K_V1 if not args.from_scratch else None, progress=True, wide=args.wide, **{
-        'num_classes': 1000,
+    vit = relu_vit_b_16(weights=None, progress=True, wide=False, **{
+        'num_classes': args.num_classes,
         'rezero': False,
         'norm_layer': partial(torch.nn.LayerNorm, eps=1e-6),
     })
     
-    model, _, output_dir = ImageNet1kSparsify()(
-            args.dataset,
-            args.title + '/' + model_type,
-            vit,
-            args.zeroth_bias,
-            lambda: ActivationPosition(make_activation_layer()),
-            False,
-            args.zeroth_bias,
-            log_per_step=args.log_per_step,
+    model, _, output_dir = ImageNet1kSparsify(
+        db_mlp=args.zeroth_bias,
+        jsrelu=activation_maker,
+        restricted_affine=False,
+        magic_synapse=False,
+        zeroth_bias_clipping=None,
+    )(
+            name='vit',
+            title=args.title + '/' + model_type + str(replace_config(args, title=SpecialReplacement.DELETE)).replace('=', '').replace('(', '_').replace(')', '_'),
+            model=vit,
             device="cuda",
             resume=args.resume,
             dataloader=dataloader,
-            physical_batch_size=args.batch_size
         )
     
     args.output_dir = output_dir
@@ -157,18 +194,21 @@ else:
 
 
 vit = make_model(model_type=model_type, args=args,dataloader=train_dataloader)
+
+vit.losses.writer.add_image(
+    "activation_and_derivative",
+    plot_activation(activation_maker()),
+    1
+)
+
+vit.losses.writer.add_scalar("test", 0, 1)
+
+vit.losses.writer.flush()
+
     
 
 if args.careful_bias_initialization:
     careful_bias_initialization(vit, args.shift_x)
-
-def make_scheduler(optim):
-    return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optim, 
-            T_max=args.n_epoch, 
-            eta_min=0.0, 
-            verbose=True
-        )
 
 training = Training(
     n_epoch=args.n_epoch,
@@ -176,15 +216,21 @@ training = Training(
     train_dataloader=train_dataloader,
     test_dataloader=test_dataloader,
     lr=args.lr,
-    writer=vit.writer,
-    test_every_epoch=1,
+    writer=vit.losses.writer,
+    test_every_epoch=10,
     save_every_epoch=20,
     optimizer=args.optimizer,
     weight_decay=args.weight_decay,
     gradient_clipping=args.grad_clipping,
     log_per_step=args.log_per_step,
     mixed_precision=args.mixed_precision,
-    scheduler_maker=make_scheduler
+    scheduler_args={
+        'lr_lambda': lambda epoch: args.initial_lr_ratio + min(epoch / len(train_dataloader) / args.warmup_epoch, 1) * (1 - args.initial_lr_ratio),
+        'last_epoch': args.warmup_epoch,
+    } if not args.rezero and args.warmup_epoch is not None and args.warmup_epoch > 0 else None,
+    stepwise_scheduling=True,
+    initial_test=False,
+    meta_batch_size=args.batch_size // args.physical_batch_size
 )
 
 training.run()
