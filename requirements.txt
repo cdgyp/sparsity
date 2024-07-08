@@ -13,8 +13,8 @@ scikit-learn
 tensorboard 
 tensorboardX 
 toml 
-torchaudio==2.0.2
-torchvision==0.15.2
+torchaudio==2.1.0
+torchvision==0.16.0
 transformers 
 triton==2.0.0
 unicodedata2 
