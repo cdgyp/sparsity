@@ -7,8 +7,6 @@ from codes.base.base import BaseModule, Plugin, ModuleReference
 from torch import einsum
 
 from ..base import ForwardHook, BackwardHook, Hook, Plugin, replace_config, LossManager
-# from .vit import ViT, FeedForward
-# from .relu_vit import MLPBlock
 from .activations import CustomizedActivation, ActivationPosition
 from .magic import MagicSynapse
 

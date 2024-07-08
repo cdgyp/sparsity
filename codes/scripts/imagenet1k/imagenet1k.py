@@ -20,7 +20,6 @@ from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 from ...base import LossManager, Model, addprop
 from ...procedures.adversarial import FGSMExample
-# from ...scheduler.sine import SineAnnealingScheduler
 
 import inspect
 
@@ -514,14 +513,6 @@ def main(args):
     args.lr_scheduler = args.lr_scheduler.lower()
     if args.lr_scheduler == "steplr":
         main_lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
-    elif args.lr_scheduler == 'sineannealinglr':
-        main_lr_scheduler = SineAnnealingScheduler(
-            optimizer,
-            T_max=args.epochs - args.lr_warmup_epochs,
-            last_epoch=args.start_epoch - 1,
-            warmup_phase=args.warmup_phase,
-            verbose=True
-        )
     elif args.lr_scheduler == "cosineannealinglr":
         main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, 

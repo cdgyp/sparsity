@@ -11,20 +11,14 @@
 │   │   ├── hooks.py                        # hooks used to track sparsities, spectral increase, etc.
 │   │   ├── jsrelu_ext                      # C++ extension (to reduce overhead) of J-SquaredReLU
 │   │   ├── lora.py                         # LoRA implementation
-│   │   ├── magic.py                        # tokenwise synapse noise, not used in experiments
 │   │   ├── relu_vit.py                     # ViT adopted from TorchVision but with customized activation functions
 │   │   ├── robustness.py                   # Zeroth Bias, DB-MLP and restricted LayerNorm
-│   │   ├── sparsify.py                     # putting all sparsification methods together for easier use
-│   │   └── vit.py                          # ViT adopted from `pytorch-vit`, deprecated
-│   ├── scheduler                           
-│   │   └── sine.py                         # SineAnnealing scheduler, previously designed for GELU adaptation in finetuning, deprecated
+│   │   └── sparsify.py                     # putting all sparsification methods together for easier use
 │   └── scripts                             # task specific codes
 │       ├── after_training                  # eigenvalue decomposition to demonstrate spectral concentration
 │       ├── finetune.sh                     # deprecated
 │       ├── imagenet1k                      # codes for training and finetuning ViT-Base on ImageNet-1k
 │       ├── T5                              # codes for training and finetuning T5 on C4
-│       ├── improvements_imagenet1k.sh      # deprecated
-│       ├── improvements.sh                 # deprecated
 │       ├── manipulate.py                   # codes of experiments for validation, i.e., manipulating activation sparsity through gradient sparsity
 │       └── manipulate.sh                   # script to launch experiments for validation
 ├── data                                    # directory to hold datasets
@@ -37,11 +31,9 @@
 ├── extensions                              # where J-SquaredReLU C++ extension is installed
 ├── install_extensions.sh                   # script to install J-SquaredReLU C++ extension
 ├── hf_caches                               # manually cloned Huggingface repos
-│   └── t5-base
 ├── clone_T5_repo.sh                        # manual script to clone Huggingface repos
 ├── module_wrapper.py                       # wrapping python modules because we use relative imports
 └── start_points                            # folder to hold checkpoints from which finetuning starts
-    └── t5-base
 ```
 
 ## Dependencies
