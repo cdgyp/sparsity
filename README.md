@@ -38,7 +38,7 @@
 ├── install_extensions.sh                   # script to install J-SquaredReLU C++ extension
 ├── hf_caches                               # manually cloned Huggingface repos
 │   └── t5-base
-├── clone_T5_repo.sh                        # script to clone Huggingface repos
+├── clone_T5_repo.sh                        # manual script to clone Huggingface repos
 ├── module_wrapper.py                       # wrapping python modules because we use relative imports
 └── start_points                            # folder to hold checkpoints from which finetuning starts
     └── t5-base
@@ -49,6 +49,16 @@
 Use the following commands to pull submodules required by this repo:
 ```bash
 git submodule update --init
+```
+
+Run the following codes to install C++ extension of our JSReLU:
+```bash
+bash install_extensions.sh
+```
+
+Run the following codes to clone T5 repo:
+```bash
+bash clone_T5_repo.sh
 ```
 
 Also see `./requirements.txt`.
