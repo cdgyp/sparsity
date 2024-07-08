@@ -1,12 +1,5 @@
 # Experiments in "A Theoretical Explanation of Activation Sparsity through Flat Minima and Adversarial Robustness"
 
-## Initialization
-
-Use the following commands to pull submodules required by this repo:
-```bash
-git submodule update --init
-```
-
 ## File Structure
 
 ```bash
@@ -53,7 +46,12 @@ git submodule update --init
 
 ## Dependencies
 
-See `./requirements.txt`.
+Use the following commands to pull submodules required by this repo:
+```bash
+git submodule update --init
+```
+
+Also see `./requirements.txt`.
 
 ## Dataset Preparation
 
@@ -85,7 +83,7 @@ Run the following commands to download a subset of C4:
 bash codes/scripts/T5/c4.sh
 ```
 
-After it finishes `data/` should look like
+After it finishes, `data/` should look like
 
 ```bash
 .
@@ -101,7 +99,7 @@ After it finishes `data/` should look like
 ...
 ```
 
-## Reproducing Experiments
+## Experiments Reproduction
 
 All commands to reproduce experiments should be executed at the root of this repo.
 
@@ -131,7 +129,7 @@ bash codes/scripts/manipulate.sh
 
 When the experiments are finished, results can be found at `runs/manipulate_width_implicit_relu2` and viewed by opening TensorBoard at that directory. Filter by `shift_x` and `shift_y` to see different activation concentration manipulated by gradient sparsity.
 
-### ViT-Base/16 on ImageNet-1k (Section III-B, Setcion VI-B, Section VI-C)
+### ViT-Base/16 on ImageNet-1k (Setcion VI)
 
 To train from scratch, use the following commands:
 
@@ -151,7 +149,7 @@ The results can be found under `runs/imagenet1k/finetuning/`.
 
 Feel free to adjust hyperparameters and parameters of logging and checkpointing in the above scripts.
 
-### T5-Base on C4 (Section VI-B, Section VI-C)
+### T5-Base on C4 (Section VI)
 
 To train from scratch, run
 ```bash
